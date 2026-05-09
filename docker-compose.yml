@@ -1,0 +1,111 @@
+services:
+  app:
+    build:
+      context: .
+      target: production
+    image: prime-crm-app:latest
+    container_name: crm-app
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      - ./:/app
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [crm]
+
+  horizon:
+    build:
+      context: .
+      target: horizon
+    image: prime-crm-app:latest
+    container_name: crm-horizon
+    restart: unless-stopped
+    volumes:
+      - ./:/app
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [crm]
+
+  scheduler:
+    build:
+      context: .
+      target: scheduler
+    image: prime-crm-app:latest
+    container_name: crm-scheduler
+    restart: unless-stopped
+    volumes:
+      - ./:/app
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [crm]
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: crm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:-crm}
+      POSTGRES_USER: ${DB_USERNAME:-crm}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-crm}
+    ports:
+      - "${DB_PORT_HOST:-5432}:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-crm} -d ${DB_DATABASE:-crm}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [crm]
+
+  redis:
+    image: redis:7-alpine
+    container_name: crm-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory-policy allkeys-lru
+    ports:
+      - "${REDIS_PORT_HOST:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks: [crm]
+
+  soketi:
+    image: quay.io/soketi/soketi:1.6-16-alpine
+    container_name: crm-soketi
+    restart: unless-stopped
+    environment:
+      SOKETI_DEBUG: 0
+      SOKETI_DEFAULT_APP_ID: "${PUSHER_APP_ID:-app-id}"
+      SOKETI_DEFAULT_APP_KEY: "${PUSHER_APP_KEY:-app-key}"
+      SOKETI_DEFAULT_APP_SECRET: "${PUSHER_APP_SECRET:-app-secret}"
+      SOKETI_METRICS_SERVER_PORT: 9601
+    ports:
+      - "${PUSHER_PORT:-6001}:6001"
+      - "9601:9601"
+    networks: [crm]
+
+volumes:
+  pg-data:
+  redis-data:
+
+networks:
+  crm:
+    driver: bridge

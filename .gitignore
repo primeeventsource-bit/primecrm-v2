@@ -1,0 +1,56 @@
+# Dependencies
+/vendor
+/node_modules
+/public/build
+/public/hot
+/public/storage
+
+# Laravel storage
+/storage/*.key
+/storage/pail
+/storage/app/public
+/storage/framework/cache/*
+/storage/framework/sessions/*
+/storage/framework/testing/*
+/storage/framework/views/*
+/storage/logs/*
+!/storage/framework/cache/.gitignore
+!/storage/framework/sessions/.gitignore
+!/storage/framework/testing/.gitignore
+!/storage/framework/views/.gitignore
+!/storage/logs/.gitignore
+
+# Environment
+.env
+.env.backup
+.env.production
+.env.*.local
+.phpunit.result.cache
+.phpunit.cache
+
+# IDE / OS
+.idea
+.vscode
+.fleet
+.nova
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+Homestead.json
+Homestead.yaml
+auth.json
+npm-debug.log
+yarn-error.log
+
+# Build artifacts
+/.phpactor.json
+
+# Azurite local blob storage emulator
+__blobstorage__/
+__queuestorage__/
+__azurite_db_blob__.json
+__azurite_db_blob_extent__.json
+__azurite_db_queue__.json
+__azurite_db_queue_extent__.json
+__azurite_db_table__.json
