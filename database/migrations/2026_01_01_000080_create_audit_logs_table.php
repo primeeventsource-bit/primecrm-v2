@@ -19,8 +19,8 @@ return new class extends Migration
             // user.role_changed, contract.signed, dnc.added, etc
             $table->string('entity_type')->nullable();
             $table->uuid('entity_id')->nullable();
-            $table->jsonb('changes')->nullable(); // {field: {from, to}}
-            $table->jsonb('context')->nullable(); // request metadata, reason
+            $table->json('changes')->nullable(); // {field: {from, to}}
+            $table->json('context')->nullable(); // request metadata, reason
             $table->string('ip_address', 45)->nullable();
             $table->text('user_agent')->nullable();
             $table->string('request_id')->nullable(); // correlation across logs

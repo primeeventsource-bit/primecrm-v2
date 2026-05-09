@@ -21,13 +21,24 @@ return Application::configure(basePath: dirname(__DIR__))
         commands: __DIR__.'/../routes/console.php',
         health: '/up',
     )
+    ->withBroadcasting(__DIR__.'/../routes/channels.php', [
+        'prefix' => 'broadcasting',
+        'middleware' => ['web', 'auth:sanctum'],
+    ])
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'tenant' => \App\Core\Shared\Http\Middleware\ResolveTenant::class,
         ]);
 
-        // Stateful API auth via Sanctum SPA — only relevant once the Vue UI lands.
+        // Stateful API auth via Sanctum SPA. Inertia pages also use this
+        // session, with CSRF on top.
         $middleware->statefulApi();
+
+        // Inertia: shares Sanctum auth user, csrf token, and broadcasting
+        // config into every Inertia page response.
+        $middleware->web(append: [
+            \App\Core\Shared\Http\Middleware\HandleInertiaRequests::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         // Tenant-scoped queries that can't resolve a tenant should never fall

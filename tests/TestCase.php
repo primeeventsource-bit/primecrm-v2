@@ -11,6 +11,7 @@ use App\Support\Enums\UserRole;
 use Database\Factories\TenantFactory;
 use Database\Factories\UserFactory;
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
+use Laravel\Sanctum\Sanctum;
 
 abstract class TestCase extends BaseTestCase
 {
@@ -41,7 +42,11 @@ abstract class TestCase extends BaseTestCase
             ->create();
 
         app(TenantContext::class)->set($tenant->id, $user->id);
-        $this->actingAs($user);
+
+        // Sanctum's helper authenticates the user under the same guard the
+        // routes use (`auth:sanctum`); the plain Laravel actingAs() leaves
+        // the Sanctum middleware unable to resolve a user.
+        Sanctum::actingAs($user);
 
         return $user;
     }

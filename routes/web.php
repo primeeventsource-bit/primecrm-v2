@@ -2,19 +2,28 @@
 
 declare(strict_types=1);
 
+use App\Core\Shared\Http\Controllers\InertiaPageController;
 use Illuminate\Support\Facades\Route;
 
 /*
 |--------------------------------------------------------------------------
-| Web Routes
+| Web Routes (Inertia)
 |--------------------------------------------------------------------------
-| Browser-facing routes. The Vue 3 + Inertia dialer UI lands in Response 5;
-| until then this file just exposes a JSON identity endpoint at the root so
-| Cloud's health check has something to hit.
+| Public landing → /login. Everything else requires auth:sanctum + tenant.
+| Cloud's health probe hits /up (configured in bootstrap/app.php).
 */
 
-Route::get('/', fn () => response()->json([
-    'name' => config('app.name'),
-    'env' => config('app.env'),
-    'status' => 'ok',
-]));
+Route::get('/', fn () => redirect('/dashboard'));
+
+Route::get('/login', [InertiaPageController::class, 'login'])->name('login');
+
+Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
+    Route::get('/dashboard', [InertiaPageController::class, 'dashboard'])->name('dashboard');
+    Route::get('/dialer/console', [InertiaPageController::class, 'dialerConsole'])->name('dialer.console');
+    Route::get('/pipeline', [InertiaPageController::class, 'pipeline'])->name('pipeline.index');
+    Route::get('/booking/search', [InertiaPageController::class, 'bookingSearch'])->name('booking.search');
+    Route::get('/payment/capture', [InertiaPageController::class, 'paymentCapture'])->name('payment.capture');
+
+    // Supervisor-only — gated inside the controller.
+    Route::get('/supervisor/war-room', [InertiaPageController::class, 'warRoom'])->name('supervisor.war_room');
+});

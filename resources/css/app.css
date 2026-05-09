@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+    html {
+        font-family: 'Inter', system-ui, sans-serif;
+    }
+    body {
+        @apply bg-slate-50 text-slate-900 antialiased;
+    }
+}
+
+@layer components {
+    .btn {
+        @apply inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium
+               transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+    }
+    .btn-primary {
+        @apply btn bg-blue-600 text-white hover:bg-blue-700;
+    }
+    .btn-danger {
+        @apply btn bg-red-600 text-white hover:bg-red-700;
+    }
+    .btn-success {
+        @apply btn bg-emerald-600 text-white hover:bg-emerald-700;
+    }
+    .btn-ghost {
+        @apply btn bg-transparent text-slate-300 hover:bg-slate-700/50;
+    }
+    .panel {
+        @apply rounded-lg border border-slate-200 bg-white shadow-sm;
+    }
+    /* Dialer-specific dark panel */
+    .dialer-panel {
+        @apply rounded-lg border border-slate-700/50 bg-dialer-panel text-slate-100 shadow-md;
+    }
+    .input {
+        @apply block w-full rounded-md border-slate-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm;
+    }
+    .label {
+        @apply block text-sm font-medium text-slate-700;
+    }
+    .pill {
+        @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+    }
+}

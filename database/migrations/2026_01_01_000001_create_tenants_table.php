@@ -16,8 +16,8 @@ return new class extends Migration
             $table->string('slug')->unique();
             $table->string('status')->default('active')->index(); // active, suspended, archived
             $table->string('timezone')->default('America/New_York');
-            $table->jsonb('settings')->nullable();
-            $table->jsonb('feature_flags')->nullable();
+            $table->json('settings')->nullable();
+            $table->json('feature_flags')->nullable();
             $table->timestamp('trial_ends_at')->nullable();
             $table->timestamps();
             $table->softDeletes();
