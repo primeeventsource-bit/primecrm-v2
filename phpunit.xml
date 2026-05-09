@@ -22,11 +22,34 @@
         <env name="APP_MAINTENANCE_DRIVER" value="file"/>
         <env name="BCRYPT_ROUNDS" value="4"/>
         <env name="CACHE_STORE" value="array"/>
-        <env name="DB_CONNECTION" value="sqlite"/>
-        <env name="DB_DATABASE" value=":memory:"/>
+
+        <!--
+        Tests run against a real PostgreSQL database — the production schema
+        depends on partial unique indexes, JSONB columns, and FILTER aggregates
+        that have no faithful equivalent in SQLite. Spin up the test DB once via
+        docker compose and Laravel will recreate the schema per-test class:
+
+            docker compose exec postgres createdb -U crm crm_test
+
+        CI uses identical settings (just override host/credentials).
+        -->
+        <env name="DB_CONNECTION" value="pgsql"/>
+        <env name="DB_HOST" value="127.0.0.1"/>
+        <env name="DB_PORT" value="5432"/>
+        <env name="DB_DATABASE" value="crm_test"/>
+        <env name="DB_USERNAME" value="crm"/>
+        <env name="DB_PASSWORD" value=""/>
+
         <env name="MAIL_MAILER" value="array"/>
         <env name="QUEUE_CONNECTION" value="sync"/>
         <env name="SESSION_DRIVER" value="array"/>
         <env name="TELESCOPE_ENABLED" value="false"/>
+        <env name="FILESYSTEM_DISK" value="local"/>
+
+        <!--
+        Use array cache for tests so AgentPerformanceRepository's cache and
+        the calling-window rule cache don't bleed across cases.
+        -->
+        <env name="CACHE_DRIVER" value="array"/>
     </php>
 </phpunit>

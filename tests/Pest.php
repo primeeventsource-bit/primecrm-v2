@@ -6,8 +6,11 @@ declare(strict_types=1);
 |--------------------------------------------------------------------------
 | Pest test bootstrap
 |--------------------------------------------------------------------------
-| Pest is the configured test runner (see composer.json scripts.test).
-| Test suites that need the full app should `uses(Tests\TestCase::class)`.
+| Tests in /tests/Feature inherit Tests\TestCase (Laravel's full app
+| bootstrapping) plus RefreshDatabase. Tests in /tests/Unit are pure
+| PHPUnit — no Laravel app, no database.
 */
 
-uses(Tests\TestCase::class)->in('Feature');
+use Illuminate\Foundation\Testing\RefreshDatabase;
+
+uses(Tests\TestCase::class, RefreshDatabase::class)->in('Feature');
