@@ -34,10 +34,12 @@ return new class extends Migration
             $table->index(['tenant_id', 'action', 'created_at']);
         });
 
-        // Sanctum personal access tokens
+        // Sanctum personal access tokens.
+        // uuidMorphs() (not morphs()) so tokenable_id is char(36) — our
+        // User model has UUID PKs and Sanctum's default morphs is bigint.
         Schema::create('personal_access_tokens', function (Blueprint $table): void {
             $table->id();
-            $table->morphs('tokenable');
+            $table->uuidMorphs('tokenable');
             $table->string('name');
             $table->string('token', 64)->unique();
             $table->text('abilities')->nullable();
