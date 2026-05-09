@@ -64,4 +64,23 @@ final class InertiaPageController extends Controller
 
         return Inertia::render('Supervisor/WarRoom');
     }
+
+    public function leadsIndex(): Response
+    {
+        return Inertia::render('Leads/Index');
+    }
+
+    public function commissionPayouts(): Response
+    {
+        return Inertia::render('Commission/Payouts');
+    }
+
+    public function complianceDnc(Request $request): Response
+    {
+        if (! $request->user()?->role->canSupervise()) {
+            abort(403);
+        }
+
+        return Inertia::render('Compliance/Dnc');
+    }
 }

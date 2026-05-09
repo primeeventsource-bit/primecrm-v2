@@ -20,10 +20,13 @@ Route::get('/login', [InertiaPageController::class, 'login'])->name('login');
 Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
     Route::get('/dashboard', [InertiaPageController::class, 'dashboard'])->name('dashboard');
     Route::get('/dialer/console', [InertiaPageController::class, 'dialerConsole'])->name('dialer.console');
+    Route::get('/leads', [InertiaPageController::class, 'leadsIndex'])->name('leads.index');
     Route::get('/pipeline', [InertiaPageController::class, 'pipeline'])->name('pipeline.index');
     Route::get('/booking/search', [InertiaPageController::class, 'bookingSearch'])->name('booking.search');
     Route::get('/payment/capture', [InertiaPageController::class, 'paymentCapture'])->name('payment.capture');
+    Route::get('/commission/payouts', [InertiaPageController::class, 'commissionPayouts'])->name('commission.payouts');
 
     // Supervisor-only — gated inside the controller.
     Route::get('/supervisor/war-room', [InertiaPageController::class, 'warRoom'])->name('supervisor.war_room');
+    Route::get('/compliance/dnc', [InertiaPageController::class, 'complianceDnc'])->name('compliance.dnc');
 });
