@@ -40,7 +40,9 @@ return new class extends Migration
 
             $table->foreign('tenant_id')->references('id')->on('tenants')->cascadeOnDelete();
             $table->foreign('commission_plan_id')->references('id')->on('commission_plans')->cascadeOnDelete();
-            $table->index(['tenant_id', 'commission_plan_id', 'role', 'active']);
+            // Explicit name: auto-name "..._tenant_id_commission_plan_id_role_active_index"
+            // exceeds MySQL's 64-char identifier limit.
+            $table->index(['tenant_id', 'commission_plan_id', 'role', 'active'], 'commission_plan_rules_lookup_idx');
         });
 
         Schema::create('commission_assignments', function (Blueprint $table): void {
@@ -130,7 +132,7 @@ return new class extends Migration
             $table->foreign('user_id')->references('id')->on('users');
             $table->foreign('approved_by_id')->references('id')->on('users')->nullOnDelete();
 
-            $table->unique(['tenant_id', 'user_id', 'period_start', 'period_end']);
+            $table->unique(['tenant_id', 'user_id', 'period_start', 'period_end'], 'commission_payouts_period_unique');
         });
 
         Schema::create('commission_adjustments', function (Blueprint $table): void {
