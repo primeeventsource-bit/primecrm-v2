@@ -47,9 +47,32 @@
         <env name="FILESYSTEM_DISK" value="local"/>
 
         <!--
+        Broadcasting in tests goes to the log driver. Domain events that
+        implement ShouldBroadcast still dispatch listeners; the broadcast
+        side just writes to laravel.log instead of hitting Pusher/Soketi.
+        -->
+        <env name="BROADCAST_CONNECTION" value="log"/>
+
+        <!--
         Use array cache for tests so AgentPerformanceRepository's cache and
         the calling-window rule cache don't bleed across cases.
         -->
         <env name="CACHE_DRIVER" value="array"/>
+
+        <!--
+        Tests that exercise the dialer (PacingEngine, AgentPresenceService,
+        LeadQueueService) need Redis. The local docker-compose stack provides
+        it; CI brings up a redis service. We force the predis client so tests
+        don't require the phpredis PHP extension. The dialer logical DB is
+        15 to keep test data far away from any dev database.
+        -->
+        <env name="REDIS_CLIENT" value="predis"/>
+        <env name="REDIS_HOST" value="127.0.0.1"/>
+        <env name="REDIS_PORT" value="6379"/>
+        <env name="REDIS_PASSWORD" value=""/>
+        <env name="REDIS_DB" value="14"/>
+        <env name="REDIS_CACHE_DB" value="14"/>
+        <env name="REDIS_DIALER_DB" value="15"/>
+        <env name="REDIS_BROADCAST_DB" value="14"/>
     </php>
 </phpunit>

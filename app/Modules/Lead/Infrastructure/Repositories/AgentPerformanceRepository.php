@@ -104,16 +104,16 @@ final class AgentPerformanceRepository
             ->where('agent_id', $agentId)
             ->where('stage', 'closed_won')
             ->where('updated_at', '>=', $since)
-            ->sum('amount');
+            ->sum('total_value');
 
         $topRevenue = (float) DB::table('deals')
             ->where('tenant_id', $tenantId)
             ->where('stage', 'closed_won')
             ->where('updated_at', '>=', $since)
             ->groupBy('agent_id')
-            ->orderByRaw('SUM(amount) DESC')
+            ->orderByRaw('SUM(total_value) DESC')
             ->limit(1)
-            ->value(DB::raw('SUM(amount)'));
+            ->value(DB::raw('SUM(total_value)'));
 
         $revenueNormalized = $topRevenue > 0
             ? min(1.0, $agentRevenue / $topRevenue)

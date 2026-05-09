@@ -52,7 +52,11 @@
             "@php artisan package:discover --ansi"
         ],
         "test": "pest --parallel",
-        "test:load": "k6 run tests/load/k6/agent-session.js"
+        "test:load": [
+            "k6 run tests/load/k6/agent-session.js",
+            "k6 run tests/load/k6/pacing-tick.js",
+            "k6 run tests/load/k6/webhook-flood.js"
+        ]
     },
     "config": {
         "optimize-autoloader": true,

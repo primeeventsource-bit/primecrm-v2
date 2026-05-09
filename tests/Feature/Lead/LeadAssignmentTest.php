@@ -77,27 +77,24 @@ it('hot leads short-circuit the pool to the top performer when configured', func
     $lowPerf = UserFactory::new()->agent()->create();
     $highPerf = UserFactory::new()->agent()->create();
 
-    // Give highPerf a closed_won deal in the window so its score is non-zero.
+    // Build a closed_won lead and a closed_won deal for highPerf so the
+    // performance repository sees a non-zero conversion + revenue signal.
+    $wonLead = LeadFactory::new()->create([
+        'assigned_agent_id' => $highPerf->id,
+        'status' => 'closed_won',
+    ]);
+
     \Illuminate\Support\Facades\DB::table('deals')->insert([
         'id' => \Ramsey\Uuid\Uuid::uuid7()->toString(),
         'tenant_id' => app(\App\Core\Shared\TenantContext::class)->id(),
+        'lead_id' => $wonLead->id,
         'agent_id' => $highPerf->id,
         'stage' => 'closed_won',
-        'amount' => 10000,
+        'total_value' => 10000,
+        'snr_amount' => 0,
+        'vd_amount' => 0,
+        'payable_amount' => 10000,
         'currency' => 'USD',
-        'created_at' => now(),
-        'updated_at' => now(),
-    ]);
-    \Illuminate\Support\Facades\DB::table('leads')->insert([
-        'id' => \Ramsey\Uuid\Uuid::uuid7()->toString(),
-        'tenant_id' => app(\App\Core\Shared\TenantContext::class)->id(),
-        'agent_id' => $highPerf->id,
-        'assigned_agent_id' => $highPerf->id,
-        'phone' => '+19999999999',
-        'phone_hash' => hash('sha256', '+19999999999'),
-        'status' => 'closed_won',
-        'priority' => 'normal',
-        'source' => 'referral',
         'created_at' => now(),
         'updated_at' => now(),
     ]);
