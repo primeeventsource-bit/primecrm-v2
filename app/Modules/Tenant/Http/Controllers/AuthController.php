@@ -8,6 +8,7 @@ use App\Modules\Tenant\Domain\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
 
@@ -35,6 +36,16 @@ final class AuthController extends Controller
             ]);
         }
 
+        // Sanctum SPA mode: establish a SESSION (not just a Bearer token).
+        // Subsequent requests from the browser carry the session cookie,
+        // and auth:sanctum middleware authenticates against it. Without
+        // this, the API call succeeds, the browser redirects to /dashboard,
+        // but the dashboard's auth middleware sees no session and bounces
+        // back to /login.
+        Auth::guard('web')->login($user, remember: true);
+        $request->session()->regenerate();
+
+        // Token still issued for non-browser API consumers (mobile, CLI).
         $token = $user->createToken('api', expiresAt: now()->addDays(30));
 
         return response()->json([
@@ -51,7 +62,17 @@ final class AuthController extends Controller
 
     public function logout(Request $request): JsonResponse
     {
-        $request->user()?->currentAccessToken()?->delete();
+        // Clear the Sanctum token if it's an actual PersonalAccessToken
+        // (mobile/CLI flow). Session-authenticated SPA requests return a
+        // TransientToken which has no delete() method — guard the call.
+        $token = $request->user()?->currentAccessToken();
+        if ($token instanceof \Laravel\Sanctum\PersonalAccessToken) {
+            $token->delete();
+        }
+
+        Auth::guard('web')->logout();
+        $request->session()->invalidate();
+        $request->session()->regenerateToken();
 
         return response()->json(['ok' => true]);
     }
