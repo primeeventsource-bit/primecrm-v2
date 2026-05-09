@@ -3,7 +3,6 @@ import './bootstrap';
 import { createApp, h, DefineComponent } from 'vue';
 import { createInertiaApp, Link, Head } from '@inertiajs/vue3';
 import { resolvePageComponent } from 'laravel-vite-plugin/inertia-helpers';
-import { ZiggyVue } from '../../vendor/tightenco/ziggy/dist/vue.m';
 import { createPinia } from 'pinia';
 import { initEcho } from './echo';
 
@@ -20,7 +19,6 @@ createInertiaApp({
 
         return createApp({ render: () => h(App, props) })
             .use(plugin)
-            .use(ZiggyVue)
             .use(pinia)
             .component('Link', Link)
             .component('Head', Head)
