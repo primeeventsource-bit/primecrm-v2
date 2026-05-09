@@ -18,6 +18,7 @@ return [
         'CallCenter',
         'Dialer',
         'Sales',
+        'Customer',
         'Booking',
         'Payment',
         'Commission',

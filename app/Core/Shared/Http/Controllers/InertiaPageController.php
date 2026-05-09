@@ -83,4 +83,16 @@ final class InertiaPageController extends Controller
 
         return Inertia::render('Compliance/Dnc');
     }
+
+    public function customersIndex(): Response
+    {
+        return Inertia::render('Customers/Index');
+    }
+
+    public function agentsIndex(Request $request): Response
+    {
+        // Listing is open to everyone; the page itself gates the
+        // "+ Add agent" button on canSupervise().
+        return Inertia::render('Agents/Index');
+    }
 }

@@ -2,6 +2,8 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import axios from 'axios';
 import AppLayout from '@/Layouts/AppLayout.vue';
+import Modal from '@/Components/Modal.vue';
+import CreateLeadForm from '@/Components/Leads/CreateLeadForm.vue';
 import type { Lead } from '@/types/api';
 
 interface Paginated<T> {
@@ -18,6 +20,13 @@ const loading = ref(false);
 const search = ref('');
 const status = ref('');
 const minScore = ref<number | null>(null);
+const createOpen = ref(false);
+
+function onLeadCreated(): void {
+    createOpen.value = false;
+    page.value = 1;
+    void load();
+}
 
 let searchTimer: number | undefined;
 
@@ -74,7 +83,14 @@ onMounted(load);
                     <h2 class="text-2xl font-semibold text-slate-900">Leads</h2>
                     <p class="mt-1 text-sm text-slate-500">{{ total }} total · sorted by score</p>
                 </div>
+                <button class="btn-primary" @click="createOpen = true">
+                    + Add lead
+                </button>
             </div>
+
+            <Modal :open="createOpen" title="Add a lead" @close="createOpen = false">
+                <CreateLeadForm @created="onLeadCreated" @cancel="createOpen = false" />
+            </Modal>
 
             <section class="panel mb-4 grid grid-cols-1 gap-3 p-3 md:grid-cols-4">
                 <div>
