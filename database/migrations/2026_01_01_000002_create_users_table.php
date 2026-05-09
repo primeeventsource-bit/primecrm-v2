@@ -23,7 +23,7 @@ return new class extends Migration
             $table->string('phone')->nullable();
             $table->string('extension')->nullable(); // SIP/Twilio extension
             $table->string('timezone')->nullable(); // overrides tenant default
-            $table->jsonb('skills')->nullable(); // for skill-based routing
+            $table->json('skills')->nullable(); // for skill-based routing
             $table->boolean('is_panama_based')->default(false); // Prime-specific exclusion flag
             $table->timestamp('last_active_at')->nullable();
             $table->rememberToken();

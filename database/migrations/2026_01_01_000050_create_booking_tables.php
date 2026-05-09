@@ -21,9 +21,9 @@ return new class extends Migration
             $table->string('state', 2)->nullable();
             $table->string('city');
             $table->string('timezone');
-            $table->jsonb('address')->nullable();
-            $table->jsonb('amenities')->nullable();
-            $table->jsonb('media')->nullable(); // photo URLs
+            $table->json('address')->nullable();
+            $table->json('amenities')->nullable();
+            $table->json('media')->nullable(); // photo URLs
             $table->integer('hold_ttl_minutes')->default(30); // resort-specific hold duration
             $table->boolean('active')->default(true);
             $table->timestamps();
@@ -40,7 +40,7 @@ return new class extends Migration
             $table->uuid('resort_id');
             $table->string('unit_type'); // studio, 1br, 2br, 3br, presidential
             $table->integer('sleeps')->default(2);
-            $table->jsonb('features')->nullable();
+            $table->json('features')->nullable();
             $table->boolean('active')->default(true);
             $table->timestamps();
 
@@ -77,11 +77,25 @@ return new class extends Migration
 
         // CRITICAL: prevent double-booking via partial unique index.
         // One non-released hold per (unit, check-in) at any time.
-        DB::statement('
-            CREATE UNIQUE INDEX inventory_availability_one_active
-            ON inventory_availability (inventory_unit_id, check_in_date)
-            WHERE status IN (\'available\', \'held\', \'booked\')
-        ');
+        // MySQL doesn't support partial unique indexes; the app-level dedup
+
+        // engine (LeadDedupService / HoldService) covers the same cases on MySQL,
+
+        // but the structural backstop is Postgres-only.
+
+        if (DB::connection()->getDriverName() === 'pgsql') {
+
+            DB::statement('
+
+                        CREATE UNIQUE INDEX inventory_availability_one_active
+
+                        ON inventory_availability (inventory_unit_id, check_in_date)
+
+                        WHERE status IN (\'available\', \'held\', \'booked\')
+
+                    ');
+
+        }
 
         Schema::create('inventory_holds', function (Blueprint $table): void {
             $table->uuid('id')->primary();
@@ -118,7 +132,7 @@ return new class extends Migration
             $table->string('currency', 3)->default('USD');
             $table->date('check_in_date');
             $table->date('check_out_date');
-            $table->jsonb('guest_details')->nullable();
+            $table->json('guest_details')->nullable();
             $table->string('confirmation_number')->unique();
             $table->timestamp('confirmed_at');
             $table->timestamp('cancelled_at')->nullable();
