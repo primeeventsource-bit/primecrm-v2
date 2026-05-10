@@ -55,6 +55,16 @@ final class Booking extends Model
         'confirmed_at',
         'cancelled_at',
         'cancellation_reason',
+        // Listing-domain renter side (added via augment_bookings_for_rentals).
+        'listing_id',
+        'inquiry_id',
+        'renter_name',
+        'renter_email',
+        'renter_phone',
+        'owner_payout',
+        'our_commission',
+        'owner_notified_at',
+        'payment_status',
     ];
 
     protected function casts(): array
@@ -67,6 +77,10 @@ final class Booking extends Model
             'paid_amount' => 'decimal:2',
             'confirmed_at' => 'datetime',
             'cancelled_at' => 'datetime',
+            // Listing-domain renter side
+            'owner_payout' => 'decimal:2',
+            'our_commission' => 'decimal:2',
+            'owner_notified_at' => 'datetime',
         ];
     }
 
@@ -88,6 +102,23 @@ final class Booking extends Model
     public function agent(): BelongsTo
     {
         return $this->belongsTo(User::class, 'agent_id');
+    }
+
+    /**
+     * Listing this booking rented (timeshare-rental domain).
+     * Nullable for legacy bookings that pre-date the listing module.
+     */
+    public function listing(): BelongsTo
+    {
+        return $this->belongsTo(\App\Modules\Listing\Domain\Models\Listing::class, 'listing_id');
+    }
+
+    /**
+     * Inquiry that converted to this booking, if any.
+     */
+    public function inquiry(): BelongsTo
+    {
+        return $this->belongsTo(\App\Modules\Listing\Domain\Models\RentalInquiry::class, 'inquiry_id');
     }
 
     public function scopeUpcoming(Builder $query): Builder

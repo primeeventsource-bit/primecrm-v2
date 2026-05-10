@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Modules\Sales\Domain\Models;
 
 use App\Modules\Lead\Domain\Models\Lead;
+use App\Modules\Sales\Domain\Enums\AgreementStatus;
 use App\Modules\Tenant\Domain\Models\User;
 use App\Support\Concerns\HasUuid;
 use App\Support\Concerns\TenantScoped;
@@ -56,6 +57,21 @@ final class Deal extends Model
         'notes',
         'expected_close_at',
         'closed_at',
+        // Listing-agreement augmentation (timeshare domain).
+        'listing_fee',
+        'listing_fee_collected',
+        'payment_status',
+        'agreement_status',
+        'listing_term_months',
+        'term_expires_at',
+        'refund_window_expires_at',
+        'tcpa_disclosure_completed',
+        'tcpa_disclosure_completed_at',
+        'tcpa_recording_uri',
+        'verification_call_completed',
+        'verification_call_completed_at',
+        'verifier_id',
+        'agreement_signed_at',
     ];
 
     protected function casts(): array
@@ -71,6 +87,18 @@ final class Deal extends Model
             'stage_changed_at' => 'datetime',
             'expected_close_at' => 'datetime',
             'closed_at' => 'datetime',
+            // Listing-agreement augmentation
+            'agreement_status' => AgreementStatus::class,
+            'listing_fee' => 'decimal:2',
+            'listing_fee_collected' => 'decimal:2',
+            'listing_term_months' => 'integer',
+            'term_expires_at' => 'date',
+            'refund_window_expires_at' => 'date',
+            'tcpa_disclosure_completed' => 'boolean',
+            'tcpa_disclosure_completed_at' => 'datetime',
+            'verification_call_completed' => 'boolean',
+            'verification_call_completed_at' => 'datetime',
+            'agreement_signed_at' => 'date',
         ];
     }
 

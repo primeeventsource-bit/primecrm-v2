@@ -20,6 +20,7 @@ return [
         'Sales',
         'Customer',
         'Note',
+        'Listing',
         'Booking',
         'Payment',
         'Commission',
