@@ -18,7 +18,7 @@ return new class extends Migration
             $table->boolean('active')->default(true);
             $table->date('effective_from');
             $table->date('effective_to')->nullable();
-            $table->jsonb('default_rules')->nullable();
+            $table->json('default_rules')->nullable();
             $table->timestamps();
             $table->softDeletes();
 
@@ -33,7 +33,7 @@ return new class extends Migration
             $table->string('role'); // closer, fronter, supervisor, qa
             $table->string('rule_type'); // flat, percentage, tiered, bonus, override
             $table->string('trigger_event'); // payment.cleared, deal.closed, booking.confirmed
-            $table->jsonb('config'); // amounts, thresholds, brackets - rule-type-specific
+            $table->json('config'); // amounts, thresholds, brackets - rule-type-specific
             $table->integer('priority')->default(0); // higher wins on overlap
             $table->boolean('active')->default(true);
             $table->timestamps();
@@ -52,7 +52,7 @@ return new class extends Migration
             $table->uuid('commission_plan_id');
             $table->date('effective_from');
             $table->date('effective_to')->nullable();
-            $table->jsonb('overrides')->nullable(); // user-specific rule overrides
+            $table->json('overrides')->nullable(); // user-specific rule overrides
             $table->timestamps();
 
             $table->foreign('tenant_id')->references('id')->on('tenants')->cascadeOnDelete();
@@ -69,7 +69,7 @@ return new class extends Migration
             $table->string('event_type'); // deal.closed_won, payment.cleared, payment.refunded, etc
             $table->string('source_entity_type'); // App\Modules\Sales\...\Deal
             $table->uuid('source_entity_id');
-            $table->jsonb('payload'); // immutable snapshot of relevant data at event time
+            $table->json('payload'); // immutable snapshot of relevant data at event time
             $table->string('idempotency_key')->unique(); // event_type:entity_id:source_event_id
             $table->timestamp('occurred_at')->index();
             $table->timestamp('created_at')->useCurrent();
@@ -90,7 +90,7 @@ return new class extends Migration
             $table->decimal('rate', 8, 4)->nullable(); // percentage, if applicable
             $table->decimal('amount', 12, 2); // final commission amount; can be negative for reversals
             $table->string('currency', 3)->default('USD');
-            $table->jsonb('explanation'); // human-readable trace: which rule, base, math
+            $table->json('explanation'); // human-readable trace: which rule, base, math
             $table->boolean('is_reversal')->default(false);
             $table->uuid('reverses_calculation_id')->nullable();
             $table->string('status')->default('pending')->index();
@@ -125,7 +125,7 @@ return new class extends Migration
             $table->timestamp('approved_at')->nullable();
             $table->timestamp('paid_at')->nullable();
             $table->string('payment_reference')->nullable(); // payroll batch ID
-            $table->jsonb('calculation_ids'); // array of calculation UUIDs included
+            $table->json('calculation_ids'); // array of calculation UUIDs included
             $table->timestamps();
 
             $table->foreign('tenant_id')->references('id')->on('tenants')->cascadeOnDelete();

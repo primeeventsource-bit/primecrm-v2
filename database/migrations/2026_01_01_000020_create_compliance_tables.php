@@ -43,7 +43,7 @@ return new class extends Migration
             $table->string('source_ip', 45)->nullable();
             $table->text('user_agent')->nullable();
             $table->string('recording_url')->nullable(); // verbal consent recording
-            $table->jsonb('consent_text_snapshot')->nullable(); // exact disclosure shown
+            $table->json('consent_text_snapshot')->nullable(); // exact disclosure shown
             $table->timestamp('consented_at');
             $table->timestamp('revoked_at')->nullable();
             $table->string('revocation_reason')->nullable();
@@ -84,8 +84,8 @@ return new class extends Migration
             $table->string('jurisdiction'); // 'US-FED', 'US-CA', 'US-FL', etc
             $table->time('earliest_local')->default('08:00:00');
             $table->time('latest_local')->default('21:00:00');
-            $table->jsonb('blocked_weekdays')->nullable(); // [0,6] = Sun, Sat
-            $table->jsonb('blocked_dates')->nullable(); // holidays
+            $table->json('blocked_weekdays')->nullable(); // [0,6] = Sun, Sat
+            $table->json('blocked_dates')->nullable(); // holidays
             $table->boolean('active')->default(true);
             $table->timestamps();
 
