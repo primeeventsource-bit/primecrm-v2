@@ -28,6 +28,10 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'tenant' => \App\Core\Shared\Http\Middleware\ResolveTenant::class,
+            // Twilio webhook signature gate. Use as `twilio.signature`
+            // for voice (default scope) or `twilio.signature:video` for
+            // Prime Connect video status callbacks.
+            'twilio.signature' => \App\Modules\CallCenter\Http\Middleware\ValidateTwilioSignature::class,
         ]);
 
         // Stateful API auth via Sanctum SPA. Inertia pages also use this

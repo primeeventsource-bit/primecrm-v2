@@ -128,6 +128,14 @@ final class DemoSeeder extends Seeder
         $this->createCommissionEventsAndCalculations($payments, $deals, $plan, $users);
         $this->createCommissionPayouts($users, $tenant);
 
+        // The last touch: scatter a handful of transitions and payments
+        // into the past hour so the dashboard's sparkline, activity
+        // ticker, and "deals today" counters render with real numbers
+        // instead of voiced empty states. Without this, the seeded
+        // narrative dates everything 1+ days back and the live panels
+        // sit dark on a freshly-seeded tenant.
+        $this->scatterLiveActivity($deals, $payments, $users);
+
         $this->command->info('--- Demo data seeded ---');
         $this->command->info("Tenant:          {$tenant->name}");
         $this->command->info("Leads:           {$leads->count()}");
@@ -1466,6 +1474,125 @@ final class DemoSeeder extends Seeder
                 ]);
             }
         }
+    }
+
+    /**
+     * Sprinkle "now-ish" activity into the seeded narrative so the live
+     * dashboard surfaces have something to read.
+     *
+     * Without this, every seeded transition / payment is dated 1+ days
+     * back (because the deal narrative implies a multi-day journey from
+     * new → qualified → pitch → close), and:
+     *   - /api/dashboard/sparkline (last 24h) shows zero bars
+     *   - /api/dashboard/activity   (last 60min) shows no events
+     *   - leaderboard's "today's deals" stays at 0 across the floor
+     *
+     * Strategy:
+     *   - Bump 6 random closed_won deals' closed_at into the last 4h so
+     *     "deals today" and "today's revenue" rise on the leaderboard.
+     *   - Insert 12 fresh `to_stage='qualified'` transitions on
+     *     contacted leads, scattered across the last 4h, attributed to
+     *     active fronters. These light up the sparkline and the ticker.
+     *   - Insert 3 fresh `cleared_at` payments in the last 30m so the
+     *     ticker has a "charged" event near the top.
+     *
+     * @param  array{admin: User, supervisor: User, qa: User, closers: list<User>, fronters: list<User>}  $users
+     */
+    private function scatterLiveActivity(
+        \Illuminate\Support\Collection $deals,
+        \Illuminate\Support\Collection $payments,
+        array $users,
+    ): void {
+        $now = now();
+
+        // 0. Bump 5 in-progress deals into negotiating so the dashboard's
+        //    "Sent to Verify" card carries a non-zero number. Negotiating
+        //    is the seam between pitch and close on this floor.
+        $deals
+            ->filter(fn (Deal $d) => $d->stage === DealStage::PitchPresented)
+            ->shuffle()
+            ->take(5)
+            ->each(function (Deal $d) use ($now): void {
+                $changedAt = $now->copy()->subMinutes(random_int(15, 360));
+                $d->update([
+                    'stage' => DealStage::Negotiating->value,
+                    'previous_stage' => DealStage::PitchPresented->value,
+                    'stage_changed_at' => $changedAt,
+                ]);
+                DealStageTransition::query()->create([
+                    'deal_id' => $d->id,
+                    'changed_by_id' => $d->agent_id,
+                    'from_stage' => DealStage::PitchPresented->value,
+                    'to_stage' => DealStage::Negotiating->value,
+                    'reason' => 'Sent to verification',
+                    'occurred_at' => $changedAt,
+                ]);
+            });
+
+        // 1. Promote 6 closed_won deals to "closed today"
+        $deals
+            ->filter(fn (Deal $d) => $d->stage === DealStage::ClosedWon)
+            ->shuffle()
+            ->take(6)
+            ->each(function (Deal $d) use ($now): void {
+                $closedAt = $now->copy()->subMinutes(random_int(5, 240));
+                $d->update([
+                    'closed_at' => $closedAt,
+                    'stage_changed_at' => $closedAt,
+                ]);
+
+                // Track the close as a fresh terminal transition so
+                // /api/dashboard/activity surfaces it as a "closed" event.
+                DealStageTransition::query()->create([
+                    'deal_id' => $d->id,
+                    'changed_by_id' => $d->agent_id,
+                    'from_stage' => DealStage::Negotiating->value,
+                    'to_stage' => DealStage::ClosedWon->value,
+                    'reason' => 'Contract signed (live)',
+                    'occurred_at' => $closedAt,
+                ]);
+            });
+
+        // 2. Live transfers — qualified transitions scattered across last 4h.
+        $fronters = $users['fronters'];
+        $contactedLeads = Lead::query()
+            ->where('status', LeadStatus::Contacted->value)
+            ->inRandomOrder()
+            ->take(12)
+            ->get();
+
+        foreach ($contactedLeads as $lead) {
+            $fronter = $fronters[array_rand($fronters)];
+            $occurred = $now->copy()->subMinutes(random_int(2, 240));
+
+            // We synthesize a deal-less transition row attributed to a
+            // contacted lead by reusing an existing deal id — the
+            // sparkline counts rows by to_stage / occurred_at and the
+            // ticker only joins the agent. Pick any deal owned by this
+            // fronter's adjacent closer for the fk integrity, since the
+            // table requires deal_id NOT NULL.
+            $hostDeal = $deals->random();
+
+            DealStageTransition::query()->create([
+                'deal_id' => $hostDeal->id,
+                'changed_by_id' => $fronter->id,
+                'from_stage' => DealStage::Contacted->value,
+                'to_stage' => DealStage::Qualified->value,
+                'reason' => 'Live transfer to closer',
+                'occurred_at' => $occurred,
+            ]);
+        }
+
+        // 3. Three "just cleared" payments — drives a charged event.
+        $payments
+            ->where('status', Payment::STATUS_SUCCEEDED)
+            ->shuffle()
+            ->take(3)
+            ->each(function (Payment $p) use ($now): void {
+                $p->update([
+                    'cleared_at' => $now->copy()->subMinutes(random_int(1, 30)),
+                ]);
+            });
     }
 
     // ---------------------------------------------------------------------
