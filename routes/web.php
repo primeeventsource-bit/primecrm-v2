@@ -26,6 +26,12 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
     Route::get('/customers', [InertiaPageController::class, 'customersIndex'])->name('customers.index');
     Route::get('/customers/{id}', [InertiaPageController::class, 'customerShow'])->name('customers.show')
         ->whereUuid('id');
+
+    // Timeshare-listing customer-service screen. The "owner" is a Lead
+    // row; this view aggregates properties + listings + bookings +
+    // financial ledger for the post-sale relationship.
+    Route::get('/owners/{id}', [InertiaPageController::class, 'ownerShow'])->name('owners.show')
+        ->whereUuid('id');
     Route::get('/agents', [InertiaPageController::class, 'agentsIndex'])->name('agents.index');
     Route::get('/pipeline', [InertiaPageController::class, 'pipeline'])->name('pipeline.index');
     Route::get('/booking/search', [InertiaPageController::class, 'bookingSearch'])->name('booking.search');

@@ -108,4 +108,13 @@ final class InertiaPageController extends Controller
         // "+ Add agent" button on canSupervise().
         return Inertia::render('Agents/Index');
     }
+
+    public function ownerShow(string $id): Response
+    {
+        // Owner profile (timeshare-listing customer-service screen).
+        // The owner is a Lead row in the database; this view is the
+        // post-sale fulfillment-and-relationship surface, distinct
+        // from /leads/{id} which is the pre-sale conversion view.
+        return Inertia::render('Owners/Show', ['ownerId' => $id]);
+    }
 }
