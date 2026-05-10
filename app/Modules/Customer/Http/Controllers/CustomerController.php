@@ -28,6 +28,7 @@ final class CustomerController extends Controller
             'status' => ['nullable', 'string'],
             'q' => ['nullable', 'string', 'max:120'],
             'user_id' => ['nullable', 'uuid'],
+            'lead_id' => ['nullable', 'uuid'],
             'sort' => ['nullable', 'in:lifetime_value,created_at,last_purchase_at'],
             'direction' => ['nullable', 'in:asc,desc'],
             'per_page' => ['nullable', 'integer', 'min:1', 'max:200'],
@@ -40,6 +41,9 @@ final class CustomerController extends Controller
         }
         if ($request->filled('user_id')) {
             $q->where('user_id', $request->string('user_id')->value());
+        }
+        if ($request->filled('lead_id')) {
+            $q->where('lead_id', $request->string('lead_id')->value());
         }
         if ($request->filled('q')) {
             $needle = '%'.mb_strtolower((string) $request->string('q')).'%';

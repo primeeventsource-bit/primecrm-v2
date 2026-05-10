@@ -70,6 +70,14 @@ final class InertiaPageController extends Controller
         return Inertia::render('Leads/Index');
     }
 
+    public function leadShow(string $id): Response
+    {
+        // Page itself fetches /api/leads/{id} — passing the id as a prop
+        // avoids a route-name lookup on the client and keeps Show.vue
+        // independent of the URL shape.
+        return Inertia::render('Leads/Show', ['leadId' => $id]);
+    }
+
     public function commissionPayouts(): Response
     {
         return Inertia::render('Commission/Payouts');
@@ -87,6 +95,11 @@ final class InertiaPageController extends Controller
     public function customersIndex(): Response
     {
         return Inertia::render('Customers/Index');
+    }
+
+    public function customerShow(string $id): Response
+    {
+        return Inertia::render('Customers/Show', ['customerId' => $id]);
     }
 
     public function agentsIndex(Request $request): Response

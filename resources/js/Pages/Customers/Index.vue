@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
 import axios from 'axios';
+import { router } from '@inertiajs/vue3';
 import AppLayout from '@/Layouts/AppLayout.vue';
 import Modal from '@/Components/Modal.vue';
 import CreateCustomerForm from '@/Components/Customers/CreateCustomerForm.vue';
@@ -149,7 +150,7 @@ onMounted(load);
                                 No customers yet. Customers are auto-created when a deal closes won, or click <b>+ Add customer</b> above.
                             </td>
                         </tr>
-                        <tr v-for="c in customers" :key="c.id" class="hover:bg-slate-50">
+                        <tr v-for="c in customers" :key="c.id" class="cursor-pointer hover:bg-slate-50" @click="router.visit(`/customers/${c.id}`)">
                             <td class="px-3 py-2 text-sm text-slate-900">
                                 {{ c.full_name }}
                                 <div v-if="c.email" class="text-xs text-slate-500">{{ c.email }}</div>

@@ -103,18 +103,31 @@ export interface Lead {
     full_name: string;
     email: string | null;
     phone: string;
+    alternate_phone: string | null;
+    country: string | null;
+    state: string | null;
+    city: string | null;
+    postal_code: string | null;
     timezone: string | null;
     status: string | null;
+    substatus: string | null;
     priority: 'low' | 'normal' | 'high' | 'hot' | null;
     score: number;
     source: string;
+    source_campaign: string | null;
+    source_medium: string | null;
     resort_interest: string | null;
+    property_type: string | null;
     estimated_value: string | null;
     assigned_agent_id: Uuid | null;
+    assigned_at: string | null;
     last_contacted_at: string | null;
     contact_attempts: number;
     is_on_dnc: boolean;
     has_express_consent: boolean;
+    consent_at: string | null;
+    created_at: string | null;
+    updated_at: string | null;
 }
 
 export interface GuardrailDecision {

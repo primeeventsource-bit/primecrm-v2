@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
 import axios from 'axios';
+import { router } from '@inertiajs/vue3';
 import AppLayout from '@/Layouts/AppLayout.vue';
 import Modal from '@/Components/Modal.vue';
 import CreateLeadForm from '@/Components/Leads/CreateLeadForm.vue';
@@ -138,7 +139,7 @@ onMounted(load);
                                 No leads yet. Run <code>DemoSeeder</code> or POST to <code>/api/leads/import</code>.
                             </td>
                         </tr>
-                        <tr v-for="l in leads" :key="l.id" class="hover:bg-slate-50">
+                        <tr v-for="l in leads" :key="l.id" class="cursor-pointer hover:bg-slate-50" @click="router.visit(`/leads/${l.id}`)">
                             <td class="px-3 py-2 text-sm text-slate-900">{{ l.full_name || '(unnamed)' }}<div v-if="l.email" class="text-xs text-slate-500">{{ l.email }}</div></td>
                             <td class="px-3 py-2 text-sm font-mono text-slate-700">{{ l.phone }}</td>
                             <td class="px-3 py-2 text-sm text-slate-600">{{ l.source }}</td>

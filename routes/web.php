@@ -21,7 +21,11 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
     Route::get('/dashboard', [InertiaPageController::class, 'dashboard'])->name('dashboard');
     Route::get('/dialer/console', [InertiaPageController::class, 'dialerConsole'])->name('dialer.console');
     Route::get('/leads', [InertiaPageController::class, 'leadsIndex'])->name('leads.index');
+    Route::get('/leads/{id}', [InertiaPageController::class, 'leadShow'])->name('leads.show')
+        ->whereUuid('id');
     Route::get('/customers', [InertiaPageController::class, 'customersIndex'])->name('customers.index');
+    Route::get('/customers/{id}', [InertiaPageController::class, 'customerShow'])->name('customers.show')
+        ->whereUuid('id');
     Route::get('/agents', [InertiaPageController::class, 'agentsIndex'])->name('agents.index');
     Route::get('/pipeline', [InertiaPageController::class, 'pipeline'])->name('pipeline.index');
     Route::get('/booking/search', [InertiaPageController::class, 'bookingSearch'])->name('booking.search');

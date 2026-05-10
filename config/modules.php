@@ -19,6 +19,7 @@ return [
         'Dialer',
         'Sales',
         'Customer',
+        'Note',
         'Booking',
         'Payment',
         'Commission',
