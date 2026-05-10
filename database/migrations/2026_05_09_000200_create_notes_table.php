@@ -29,7 +29,7 @@ return new class extends Migration
             $table->uuid('user_id')->nullable();      // author
             $table->string('kind')->default('note');  // note, call, email, sms, system
             $table->text('body');
-            $table->jsonb('metadata')->nullable();    // {direction, channel, duration_s, ...}
+            $table->json('metadata')->nullable();     // {direction, channel, duration_s, ...}
             $table->timestamps();
             $table->softDeletes();
 
