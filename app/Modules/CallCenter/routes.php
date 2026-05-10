@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 use App\Modules\CallCenter\Http\Controllers\AgentStatusController;
 use App\Modules\CallCenter\Http\Controllers\CallController;
+use App\Modules\CallCenter\Http\Controllers\PrimeConnectAccessTokenController;
+use App\Modules\CallCenter\Http\Controllers\PrimeConnectRoomController;
 use App\Modules\CallCenter\Http\Controllers\SupervisorCallController;
 use App\Modules\CallCenter\Http\Controllers\TwilioWebhookController;
 use Illuminate\Support\Facades\Route;
@@ -35,6 +37,22 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
         Route::post('/{id}/kill', [SupervisorCallController::class, 'kill']);
         Route::post('/{id}/whisper', [SupervisorCallController::class, 'whisper']);
         Route::post('/{id}/barge', [SupervisorCallController::class, 'barge']);
+    });
+
+    /*
+     * Prime Connect (video) — lobby + in-call REST surface. Lives inside
+     * the CallCenter module because rooms are a `medium = 'video'`
+     * variant of the same calls table; see 2026_05_09_000300_extend_calls_for_video.
+     */
+    Route::prefix('prime-connect')->group(function (): void {
+        Route::post('/access-token', [PrimeConnectAccessTokenController::class, 'store']);
+
+        Route::prefix('rooms')->group(function (): void {
+            Route::get('/', [PrimeConnectRoomController::class, 'index']);
+            Route::post('/', [PrimeConnectRoomController::class, 'store']);
+            Route::get('/{id}', [PrimeConnectRoomController::class, 'show']);
+            Route::delete('/{id}', [PrimeConnectRoomController::class, 'destroy']);
+        });
     });
 });
 

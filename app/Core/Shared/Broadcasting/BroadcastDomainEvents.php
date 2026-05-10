@@ -9,6 +9,8 @@ use App\Modules\CallCenter\Domain\Events\AgentStatusChanged;
 use App\Modules\CallCenter\Domain\Events\CallConnected;
 use App\Modules\CallCenter\Domain\Events\CallEnded;
 use App\Modules\CallCenter\Domain\Events\CallInitiated;
+use App\Modules\CallCenter\Domain\Events\RoomCreated;
+use App\Modules\CallCenter\Domain\Events\RoomEnded;
 use App\Modules\Dialer\Domain\Events\DialSkipped;
 use Illuminate\Events\Dispatcher;
 
@@ -31,6 +33,8 @@ final class BroadcastDomainEvents
             CallEnded::class => 'onCallEnded',
             AgentStatusChanged::class => 'onAgentStatusChanged',
             DialSkipped::class => 'onDialSkipped',
+            RoomCreated::class => 'onRoomCreated',
+            RoomEnded::class => 'onRoomEnded',
         ];
     }
 
@@ -58,6 +62,16 @@ final class BroadcastDomainEvents
             to: $event->to,
             callId: $event->callId,
         ))->toOthers();
+    }
+
+    public function onRoomCreated(RoomCreated $event): void
+    {
+        broadcast(VideoRoomBroadcast::fromCall($event->call, 'prime_connect.room.created'))->toOthers();
+    }
+
+    public function onRoomEnded(RoomEnded $event): void
+    {
+        broadcast(VideoRoomBroadcast::fromCall($event->call, 'prime_connect.room.ended'))->toOthers();
     }
 
     public function onDialSkipped(DialSkipped $event): void

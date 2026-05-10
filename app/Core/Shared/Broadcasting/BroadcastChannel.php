@@ -20,4 +20,18 @@ final class BroadcastChannel
     {
         return "tenant.{$tenantId}.supervisor";
     }
+
+    /**
+     * Per-room channel for Prime Connect video rooms. Participant events
+     * (joined / disconnected) and in-call coordination broadcasts ride
+     * here so they don't fan out to every supervisor's WebSocket pipe.
+     *
+     * Authorized only for users who are listed as participants on the
+     * room OR users with canSupervise() in the same tenant — see the
+     * `tenant.{tenantId}.room.{roomSid}` block in routes/channels.php.
+     */
+    public static function room(string $tenantId, string $roomSid): string
+    {
+        return "tenant.{$tenantId}.room.{$roomSid}";
+    }
 }
