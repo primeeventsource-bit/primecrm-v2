@@ -140,9 +140,16 @@ final class DemoSeeder extends Seeder
 
     private function createTenant(): Tenant
     {
+        // Idempotent: nuke any prior demo tenant and let the cascade
+        // (tenant_id FKs all use ->cascadeOnDelete()) clear every
+        // downstream row before we re-seed. Production tenants stay
+        // untouched because we filter by slug.
+        $slug = 'prime-vacations-demo';
+        Tenant::query()->withTrashed()->where('slug', $slug)->forceDelete();
+
         return TenantFactory::new()->create([
             'name' => 'Prime Vacations Demo',
-            'slug' => 'prime-vacations-demo',
+            'slug' => $slug,
             'status' => 'active',
             'timezone' => 'America/New_York',
         ]);
