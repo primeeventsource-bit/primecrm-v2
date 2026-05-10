@@ -23,7 +23,7 @@ return new class extends Migration
             $table->integer('calls_abandoned')->default(0);
             $table->integer('total_talk_seconds')->default(0);
             $table->integer('total_wrap_seconds')->default(0);
-            $table->json('settings')->nullable(); // mode-specific config
+            $table->jsonb('settings')->nullable(); // mode-specific config
             $table->timestamp('started_at')->nullable();
             $table->timestamp('paused_at')->nullable();
             $table->timestamp('ended_at')->nullable();
@@ -81,13 +81,13 @@ return new class extends Migration
             $table->string('transcription_status')->default('not_started');
             $table->text('transcription_text')->nullable();
             $table->string('sentiment')->nullable(); // positive, neutral, negative
-            $table->json('sentiment_timeline')->nullable();
+            $table->jsonb('sentiment_timeline')->nullable();
 
             // Cost (for unit economics)
             $table->decimal('provider_cost', 10, 4)->nullable();
             $table->string('provider_cost_currency', 3)->nullable();
 
-            $table->json('metadata')->nullable();
+            $table->jsonb('metadata')->nullable();
             $table->timestamps();
 
             $table->foreign('tenant_id')->references('id')->on('tenants')->cascadeOnDelete();
@@ -108,7 +108,7 @@ return new class extends Migration
             $table->uuid('call_id');
             $table->string('event_type'); // queued, ringing, answered, ended, recording_started, etc
             $table->string('source'); // twilio_webhook, agent_action, system_timeout
-            $table->json('payload');
+            $table->jsonb('payload');
             $table->string('idempotency_key')->nullable(); // Twilio CallSid + status combo
             $table->timestamp('occurred_at')->index();
             $table->timestamp('created_at')->useCurrent();
@@ -131,7 +131,7 @@ return new class extends Migration
             $table->uuid('current_session_id')->nullable();
             $table->timestamp('status_changed_at');
             $table->timestamp('last_heartbeat_at')->nullable();
-            $table->json('metadata')->nullable(); // skill set, queue assignment
+            $table->jsonb('metadata')->nullable(); // skill set, queue assignment
             $table->timestamps();
 
             $table->foreign('tenant_id')->references('id')->on('tenants')->cascadeOnDelete();
@@ -154,8 +154,8 @@ return new class extends Migration
             $table->integer('min_hours_between_attempts')->default(4);
             $table->time('earliest_call_local')->default('08:00:00');
             $table->time('latest_call_local')->default('21:00:00');
-            $table->json('script_template')->nullable();
-            $table->json('metadata')->nullable();
+            $table->jsonb('script_template')->nullable();
+            $table->jsonb('metadata')->nullable();
             $table->timestamp('starts_at')->nullable();
             $table->timestamp('ends_at')->nullable();
             $table->timestamps();

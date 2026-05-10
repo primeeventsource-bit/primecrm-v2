@@ -29,7 +29,7 @@ return new class extends Migration
             $table->string('status')->default('pending')->index();
             // pending, processing, succeeded, failed, refunded, partially_refunded, chargeback
             $table->uuid('parent_payment_id')->nullable(); // refund/chargeback links to original
-            $table->json('provider_metadata')->nullable();
+            $table->jsonb('provider_metadata')->nullable();
             $table->string('failure_code')->nullable();
             $table->text('failure_reason')->nullable();
             $table->timestamp('authorized_at')->nullable();
@@ -63,12 +63,12 @@ return new class extends Migration
             $table->string('provider_envelope_id')->nullable()->index();
             $table->string('s3_path')->nullable();
             $table->string('signed_pdf_s3_path')->nullable();
-            $table->json('signers')->nullable();
+            $table->jsonb('signers')->nullable();
             $table->timestamp('sent_at')->nullable();
             $table->timestamp('viewed_at')->nullable();
             $table->timestamp('signed_at')->nullable();
             $table->timestamp('expires_at')->nullable();
-            $table->json('audit_trail')->nullable();
+            $table->jsonb('audit_trail')->nullable();
             $table->timestamps();
 
             $table->foreign('tenant_id')->references('id')->on('tenants')->cascadeOnDelete();
@@ -86,8 +86,8 @@ return new class extends Migration
             $table->string('provider')->index(); // twilio, stripe, docusign
             $table->string('event_type')->index();
             $table->string('external_id'); // provider's event ID, used for dedup
-            $table->json('payload');
-            $table->json('headers')->nullable(); // signature header for re-verification
+            $table->jsonb('payload');
+            $table->jsonb('headers')->nullable(); // signature header for re-verification
             $table->string('status')->default('received')->index();
             // received, processing, processed, failed, skipped_duplicate
             $table->integer('attempts')->default(0);

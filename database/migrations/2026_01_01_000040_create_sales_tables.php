@@ -16,7 +16,7 @@ return new class extends Migration
             $table->uuid('lead_id');
             $table->uuid('agent_id'); // primary closer
             $table->uuid('fronter_id')->nullable(); // who handed off the lead
-            $table->json('additional_closer_ids')->nullable(); // multi-closer split scenarios
+            $table->jsonb('additional_closer_ids')->nullable(); // multi-closer split scenarios
 
             $table->string('stage')->default('new')->index();
             // new, contacted, qualified, pitch_presented, negotiating, closed_won, closed_lost
@@ -33,7 +33,7 @@ return new class extends Migration
             $table->uuid('booking_id')->nullable(); // becomes set on booking creation
             $table->uuid('contract_id')->nullable();
 
-            $table->json('pitch_data')->nullable(); // resort, dates, package
+            $table->jsonb('pitch_data')->nullable(); // resort, dates, package
             $table->text('notes')->nullable();
             $table->timestamp('expected_close_at')->nullable();
             $table->timestamp('closed_at')->nullable();
@@ -58,7 +58,7 @@ return new class extends Migration
             $table->string('from_stage')->nullable();
             $table->string('to_stage');
             $table->text('reason')->nullable();
-            $table->json('metadata')->nullable();
+            $table->jsonb('metadata')->nullable();
             $table->timestamp('occurred_at');
             $table->timestamp('created_at')->useCurrent();
 

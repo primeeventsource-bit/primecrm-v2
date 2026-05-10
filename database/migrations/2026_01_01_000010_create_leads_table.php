@@ -40,7 +40,7 @@ return new class extends Migration
             $table->string('source')->index(); // facebook, google, referral, csv_import, api, etc
             $table->string('source_campaign')->nullable();
             $table->string('source_medium')->nullable();
-            $table->json('source_metadata')->nullable();
+            $table->jsonb('source_metadata')->nullable();
             $table->uuid('imported_via_id')->nullable(); // links to lead_imports
 
             // Vacation-rental specific
@@ -75,17 +75,7 @@ return new class extends Migration
 
         // Tenant-scoped uniqueness: same phone in different tenants is fine.
         // Allow nullable email duplicates (unknown contacts) but dedupe phone within tenant.
-        // MySQL doesn't support partial unique indexes; the app-level dedup
-
-        // engine (LeadDedupService / HoldService) covers the same cases on MySQL,
-
-        // but the structural backstop is Postgres-only.
-
-        if (DB::connection()->getDriverName() === 'pgsql') {
-
-            DB::statement('CREATE UNIQUE INDEX leads_tenant_phone_unique ON leads (tenant_id, phone_hash) WHERE deleted_at IS NULL');
-
-        }
+        DB::statement('CREATE UNIQUE INDEX leads_tenant_phone_unique ON leads (tenant_id, phone_hash) WHERE deleted_at IS NULL');
     }
 
     public function down(): void

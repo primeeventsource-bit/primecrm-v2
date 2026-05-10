@@ -24,8 +24,8 @@ return new class extends Migration
             $table->integer('imported_count')->default(0);
             $table->integer('duplicate_count')->default(0);
             $table->integer('error_count')->default(0);
-            $table->json('column_mapping')->nullable(); // CSV column → field mapping
-            $table->json('errors')->nullable(); // sample of errors, capped
+            $table->jsonb('column_mapping')->nullable(); // CSV column → field mapping
+            $table->jsonb('errors')->nullable(); // sample of errors, capped
             $table->timestamp('started_at')->nullable();
             $table->timestamp('completed_at')->nullable();
             $table->timestamps();
