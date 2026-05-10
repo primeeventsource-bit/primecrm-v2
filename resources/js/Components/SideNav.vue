@@ -34,6 +34,7 @@ const sections = computed<NavSection[]>(() => [
             { href: '/dialer/console', label: 'Dialer', icon: '☎', show: true },
             { href: '/leads', label: 'Leads', icon: '◐', show: true },
             { href: '/customers', label: 'Customers', icon: '◍', show: true },
+            { href: '/listings', label: 'Listings', icon: '▣', show: true },
             { href: '/pipeline', label: 'Pipeline', icon: '▤', show: true },
             { href: '/booking/search', label: 'Inventory', icon: '◫', show: true },
         ],

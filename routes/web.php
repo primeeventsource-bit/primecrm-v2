@@ -32,6 +32,11 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
     // financial ledger for the post-sale relationship.
     Route::get('/owners/{id}', [InertiaPageController::class, 'ownerShow'])->name('owners.show')
         ->whereUuid('id');
+
+    // Listings management hub + detail (post-sale operational view).
+    Route::get('/listings', [InertiaPageController::class, 'listingsIndex'])->name('listings.index');
+    Route::get('/listings/{id}', [InertiaPageController::class, 'listingShow'])->name('listings.show')
+        ->whereUuid('id');
     Route::get('/agents', [InertiaPageController::class, 'agentsIndex'])->name('agents.index');
     Route::get('/pipeline', [InertiaPageController::class, 'pipeline'])->name('pipeline.index');
     Route::get('/booking/search', [InertiaPageController::class, 'bookingSearch'])->name('booking.search');

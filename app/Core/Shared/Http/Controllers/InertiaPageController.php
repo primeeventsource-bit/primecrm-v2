@@ -117,4 +117,16 @@ final class InertiaPageController extends Controller
         // from /leads/{id} which is the pre-sale conversion view.
         return Inertia::render('Owners/Show', ['ownerId' => $id]);
     }
+
+    public function listingsIndex(): Response
+    {
+        // Post-sale operational view: pending distribution / live /
+        // with inquiries / booked / expired_unrented.
+        return Inertia::render('Listings/Index');
+    }
+
+    public function listingShow(string $id): Response
+    {
+        return Inertia::render('Listings/Show', ['listingId' => $id]);
+    }
 }
