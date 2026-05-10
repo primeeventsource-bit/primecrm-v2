@@ -73,12 +73,14 @@ watch([period, offset], () => void load());
 onMounted(load);
 
 // Auto-refresh every 30s while live (offset=0). Past windows are
-// snapshots; no point churning their numbers.
+// snapshots; no point churning their numbers. The umbrella loader
+// is defined further down once activity / sparkline / leaderboard
+// fetchers exist.
 let refreshTimer: number | undefined;
 function setupAutoRefresh(): void {
     if (refreshTimer !== undefined) window.clearInterval(refreshTimer);
     if (offset.value === 0) {
-        refreshTimer = window.setInterval(() => void load(), 30_000);
+        refreshTimer = window.setInterval(() => void loadAll(), 30_000);
     }
 }
 watch(offset, setupAutoRefresh, { immediate: true });
@@ -121,24 +123,83 @@ const periodWord = computed(() => {
     return 'Week';
 });
 
-// Floor leaderboard — synthesized from the per-group breakdown until
-// the per-agent endpoint ships. This keeps the visual contract that
-// the dashboard owes the floor manager (rank, status, momentum).
+// Floor leaderboard — fed from /api/dashboard/floor-status. Sorted
+// by today's revenue server-side; we just render the order we get.
 interface LeaderRow {
     rank: number;
+    id: string;
     name: string;
     role: 'closer' | 'fronter';
     location: 'US' | 'Panama';
-    deals: number;
-    revenue: number;
-    status: 'on_call' | 'idle' | 'wrap' | 'offline';
-    since: string;
+    deals_today: number;
+    revenue_today: number;
+    status: 'on_call' | 'idle' | 'wrap' | 'offline' | 'available' | 'wrap_up' | 'on_break';
+    since: string | null;
 }
 const leaderboard = ref<LeaderRow[]>([]);
 
-// Activity ticker — sourced from /api/dashboard/activity once the
-// backend ships it. For now empty; the empty state has voice.
+// Activity ticker — pulled from /api/dashboard/activity; latest 30
+// events from the last hour. Refreshed in lockstep with the summary.
 const tickerEvents = ref<TickerEvent[]>([]);
+
+// Hero KPI sparkline — bucketed transfer counts. Bars scale to the
+// max value in the series so quiet hours don't ghost the busy ones.
+interface SparkPoint { t: string; v: number }
+const sparkSeries = ref<SparkPoint[]>([]);
+const sparkMax = computed(() => Math.max(1, ...sparkSeries.value.map((p) => p.v)));
+
+// Map FloorStatusPill's tighter status vocabulary onto the broader
+// agent_statuses set we get from the API.
+function leaderStatus(s: LeaderRow['status']): 'on_call' | 'idle' | 'wrap' | 'offline' {
+    if (s === 'on_call') return 'on_call';
+    if (s === 'wrap_up' || s === 'wrap') return 'wrap';
+    if (s === 'offline') return 'offline';
+    return 'idle';
+}
+
+async function loadActivity(): Promise<void> {
+    try {
+        const { data } = await axios.get<{ data: TickerEvent[] }>('/api/dashboard/activity', {
+            params: { limit: 30, since_minutes: 240 },
+        });
+        tickerEvents.value = data.data;
+    } catch {
+        tickerEvents.value = [];
+    }
+}
+
+async function loadSparkline(): Promise<void> {
+    try {
+        const { data } = await axios.get<{ series: SparkPoint[] }>('/api/dashboard/sparkline', {
+            params: { metric: 'transfers', period: 'daily', buckets: 24 },
+        });
+        sparkSeries.value = data.series;
+    } catch {
+        sparkSeries.value = [];
+    }
+}
+
+async function loadLeaderboard(): Promise<void> {
+    try {
+        const { data } = await axios.get<{ data: LeaderRow[] }>('/api/dashboard/floor-status');
+        leaderboard.value = data.data;
+    } catch {
+        leaderboard.value = [];
+    }
+}
+
+// One umbrella loader the auto-refresh re-uses so the ticker, the
+// leaderboard, and the sparkline all advance in lockstep with the
+// summary cards rather than flashing piecemeal.
+async function loadAll(): Promise<void> {
+    await Promise.all([load(), loadActivity(), loadSparkline(), loadLeaderboard()]);
+}
+
+onMounted(() => {
+    void loadActivity();
+    void loadSparkline();
+    void loadLeaderboard();
+});
 </script>
 
 <template>
@@ -206,7 +267,7 @@ const tickerEvents = ref<TickerEvent[]>([]);
                         @click="offset = Math.max(0, offset - 1)"
                     >›</button>
                 </div>
-                <button class="btn-primary" :disabled="loading" @click="load">
+                <button class="btn-primary" :disabled="loading" @click="loadAll">
                     <span v-if="loading">Loading…</span>
                     <span v-else>↻ Snapshot</span>
                 </button>
@@ -245,12 +306,28 @@ const tickerEvents = ref<TickerEvent[]>([]);
                                 No transfers yet this {{ periodWord.toLowerCase() }}. The hot number lives here.
                             </span>
                         </div>
-                        <!-- Sparkline placeholder — real series ships with the
-                             /api/dashboard/sparkline endpoint. -->
+                        <!-- Sparkline — bucketed transfers from /api/dashboard/sparkline.
+                             Bars scale to series max so the busiest hour pegs at 100%.
+                             Falls back to 24 ghost bars while data is in flight. -->
                         <div class="mt-4 h-10 flex items-end gap-1">
-                            <div v-for="i in 24" :key="i"
-                                 class="flex-1 rounded-sm bg-floor-accent/20"
-                                 :style="{ height: `${10 + (((i * 7) % 90))}%` }"></div>
+                            <template v-if="sparkSeries.length > 0">
+                                <div
+                                    v-for="p in sparkSeries"
+                                    :key="p.t"
+                                    :title="`${new Date(p.t).toLocaleTimeString('en-US', { hour: 'numeric' })} · ${p.v} transfer${p.v === 1 ? '' : 's'}`"
+                                    class="flex-1 rounded-sm transition-all"
+                                    :class="p.v > 0 ? 'bg-floor-accent/60' : 'bg-floor-accent/10'"
+                                    :style="{ height: `${Math.max(8, (p.v / sparkMax) * 100)}%` }"
+                                ></div>
+                            </template>
+                            <template v-else>
+                                <div
+                                    v-for="i in 24"
+                                    :key="`ph-${i}`"
+                                    class="flex-1 rounded-sm bg-floor-accent/10"
+                                    style="height: 8%"
+                                ></div>
+                            </template>
                         </div>
                     </div>
                 </div>
@@ -365,18 +442,18 @@ const tickerEvents = ref<TickerEvent[]>([]);
                             <span class="text-[10px] font-mono uppercase tracking-wider text-deck-dim">live</span>
                         </div>
                         <ul v-if="leaderboard.length > 0" class="divide-y divide-deck-line/50">
-                            <li v-for="row in leaderboard" :key="row.name"
+                            <li v-for="row in leaderboard" :key="row.id"
                                 class="flex items-center gap-3 px-4 py-2.5 hover:bg-deck-raised/40">
                                 <span class="font-mono tabular-nums text-deck-dim text-sm w-5 text-right">{{ row.rank }}</span>
                                 <div class="flex-1 min-w-0">
                                     <div class="text-sm text-deck-text truncate">{{ row.name }}</div>
                                     <div class="text-[10px] font-mono uppercase tracking-wider text-deck-dim">
-                                        {{ row.role }} · {{ row.location }}
+                                        {{ row.role }} · {{ row.location }} · {{ row.deals_today }} today
                                     </div>
                                 </div>
                                 <div class="text-right">
-                                    <div class="text-xs font-mono tabular-nums text-floor-win">{{ fmtMoney(row.revenue) }}</div>
-                                    <FloorStatusPill :status="row.status" :since="row.since" class="mt-0.5" />
+                                    <div class="text-xs font-mono tabular-nums" :class="row.revenue_today > 0 ? 'text-floor-win' : 'text-deck-dim'">{{ fmtMoney(row.revenue_today) }}</div>
+                                    <FloorStatusPill :status="leaderStatus(row.status)" :since="row.since" class="mt-0.5" />
                                 </div>
                             </li>
                         </ul>
