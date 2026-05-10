@@ -140,12 +140,34 @@ final class DemoSeeder extends Seeder
 
     private function createTenant(): Tenant
     {
-        // Idempotent: nuke any prior demo tenant and let the cascade
-        // (tenant_id FKs all use ->cascadeOnDelete()) clear every
-        // downstream row before we re-seed. Production tenants stay
-        // untouched because we filter by slug.
+        // Idempotent: nuke ANY prior demo tenant — by slug AND by the
+        // tenant of any prior admin@demo.test user — so multiple parallel
+        // seed runs converge on the same fresh state. Without the email
+        // path, an earlier seed using a slightly different slug would
+        // leave its tenant intact and login would match THAT one,
+        // leaving the new tenant orphaned.
+        //
+        // The cascadeOnDelete() on every tenant_id FK clears all
+        // downstream rows in one shot. Production tenants are filtered
+        // out because we only delete tenants whose admin email is
+        // the demo address.
         $slug = 'prime-vacations-demo';
-        Tenant::query()->withTrashed()->where('slug', $slug)->forceDelete();
+        $demoEmails = ['admin@demo.test', 'supervisor@demo.test', 'sofia@demo.test'];
+
+        $priorTenantIds = User::withoutTenantScope()
+            ->whereIn('email', $demoEmails)
+            ->pluck('tenant_id')
+            ->unique()
+            ->all();
+
+        $tenantIdsToDelete = array_unique(array_merge(
+            $priorTenantIds,
+            Tenant::query()->withTrashed()->where('slug', $slug)->pluck('id')->all(),
+        ));
+
+        if (! empty($tenantIdsToDelete)) {
+            Tenant::query()->withTrashed()->whereIn('id', $tenantIdsToDelete)->forceDelete();
+        }
 
         return TenantFactory::new()->create([
             'name' => 'Prime Vacations Demo',

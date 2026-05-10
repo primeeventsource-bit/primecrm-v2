@@ -10,7 +10,9 @@ use App\Support\Concerns\HasUuid;
 use App\Support\Concerns\TenantScoped;
 use App\Support\Enums\CallDirection;
 use App\Support\Enums\CallDisposition;
+use App\Support\Enums\CallMedium;
 use App\Support\Enums\CallStatus;
+use App\Support\Enums\RoomStatus;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -73,6 +75,15 @@ final class Call extends Model
         'provider_cost',
         'provider_cost_currency',
         'metadata',
+        // Prime Connect (medium = 'video') extension columns. Voice rows
+        // leave these null. See 2026_05_09_000300_extend_calls_for_video.
+        'medium',
+        'twilio_room_sid',
+        'twilio_composition_sid',
+        'room_name',
+        'room_status',
+        'scheduled_for',
+        'lobby_metadata',
     ];
 
     protected function casts(): array
@@ -93,6 +104,11 @@ final class Call extends Model
             'wrap_up_seconds' => 'integer',
             'recording_duration_seconds' => 'integer',
             'provider_cost' => 'decimal:4',
+            // Prime Connect casts.
+            'medium' => CallMedium::class,
+            'room_status' => RoomStatus::class,
+            'scheduled_for' => 'datetime',
+            'lobby_metadata' => 'array',
         ];
     }
 
@@ -109,6 +125,12 @@ final class Call extends Model
     public function events(): HasMany
     {
         return $this->hasMany(CallEvent::class);
+    }
+
+    /** Prime Connect (video) participants. Empty for voice calls. */
+    public function participants(): HasMany
+    {
+        return $this->hasMany(CallParticipant::class);
     }
 
     /* ----------------------------------------------------------------------
@@ -133,6 +155,25 @@ final class Call extends Model
     public function scopeBySid(Builder $query, string $sid): Builder
     {
         return $query->where('provider_call_sid', $sid);
+    }
+
+    /** Voice (telephony) calls only — the dialer / supervisor surfaces. */
+    public function scopeVoice(Builder $query): Builder
+    {
+        return $query->where('medium', CallMedium::Voice->value);
+    }
+
+    /** Prime Connect video rooms only — the lobby / in-call surfaces. */
+    public function scopeVideo(Builder $query): Builder
+    {
+        return $query->where('medium', CallMedium::Video->value);
+    }
+
+    /** Active video rooms (in_progress, not yet completed/failed). */
+    public function scopeActiveRooms(Builder $query): Builder
+    {
+        return $query->where('medium', CallMedium::Video->value)
+            ->where('room_status', RoomStatus::InProgress->value);
     }
 
     /* ----------------------------------------------------------------------
