@@ -759,7 +759,9 @@ final class DemoSeeder extends Seeder
             ContactAttempt::query()->create([
                 'phone_hash' => $lead->phone_hash,
                 'attempt_type' => ContactAttempt::ATTEMPT_OUTBOUND_CALL,
-                'outcome' => $this->outcomeFromCallStatus($call->status, $call->disposition),
+                // $call->status / $call->disposition are enum-cast on the Call model;
+                // the helper takes strings, so unwrap to the backing values.
+                'outcome' => $this->outcomeFromCallStatus($call->status?->value, $call->disposition?->value),
                 'attempted_at' => $call->initiated_at ?? $call->created_at,
             ]);
         }
@@ -1475,8 +1477,9 @@ final class DemoSeeder extends Seeder
         };
     }
 
-    private function outcomeFromCallStatus(string $status, ?string $disposition): string
+    private function outcomeFromCallStatus(?string $status, ?string $disposition): string
     {
+        $status ??= CallStatus::Completed->value;
         if ($disposition === CallDisposition::DncRequest->value) {
             return 'dnc_requested';
         }
