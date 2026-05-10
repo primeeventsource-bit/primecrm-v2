@@ -46,4 +46,5 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
     // Supervisor-only — gated inside the controller.
     Route::get('/supervisor/war-room', [InertiaPageController::class, 'warRoom'])->name('supervisor.war_room');
     Route::get('/compliance/dnc', [InertiaPageController::class, 'complianceDnc'])->name('compliance.dnc');
+    Route::get('/partner-sites', [InertiaPageController::class, 'partnerSites'])->name('partner_sites.index');
 });

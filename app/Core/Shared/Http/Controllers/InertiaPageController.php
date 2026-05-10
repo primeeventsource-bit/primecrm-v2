@@ -129,4 +129,15 @@ final class InertiaPageController extends Controller
     {
         return Inertia::render('Listings/Show', ['listingId' => $id]);
     }
+
+    public function partnerSites(Request $request): Response
+    {
+        // Config + performance metrics for each partner site we push to.
+        // Supervisor-only because credentials live here.
+        if (! $request->user()?->role->canSupervise()) {
+            abort(403);
+        }
+
+        return Inertia::render('PartnerSites/Index');
+    }
 }

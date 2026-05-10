@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import axios from 'axios';
 import { Link } from '@inertiajs/vue3';
 import AppLayout from '@/Layouts/AppLayout.vue';
@@ -125,6 +125,17 @@ const props = defineProps<{ listingId: string }>();
 const detail = ref<Detail | null>(null);
 const loading = ref(true);
 const error = ref<string | null>(null);
+const flash = ref<{ kind: 'ok' | 'err'; msg: string } | null>(null);
+
+// Distribution-action busy state per partner_site_listing.id, so a
+// single row can show "working…" without freezing the whole grid.
+const busyRowId = ref<string | null>(null);
+
+// Pickable partner sites for "+ Add to site" — populated lazily when
+// the picker opens, filtered to ones we haven't pushed to yet.
+interface PickableSite { id: string; name: string; slug: string }
+const allSites = ref<PickableSite[]>([]);
+const showAddPicker = ref(false);
 
 async function load(): Promise<void> {
     loading.value = true;
@@ -139,6 +150,62 @@ async function load(): Promise<void> {
         loading.value = false;
     }
 }
+
+async function loadSites(): Promise<void> {
+    if (allSites.value.length > 0) return;
+    try {
+        const { data } = await axios.get<{ data: PickableSite[] }>('/api/partner-sites');
+        allSites.value = data.data;
+    } catch {
+        allSites.value = [];
+    }
+}
+
+async function distributionAction(rowId: string, action: 'repush' | 'pause' | 'resume' | 'sync'): Promise<void> {
+    if (!detail.value) return;
+    busyRowId.value = rowId;
+    flash.value = null;
+    try {
+        const { data } = await axios.post<{ message: string }>(
+            `/api/listings/${props.listingId}/distributions/${rowId}/${action}`,
+        );
+        flash.value = { kind: 'ok', msg: data.message };
+        await load();
+    } catch (e: unknown) {
+        const msg = (e as { response?: { data?: { message?: string } } }).response?.data?.message;
+        flash.value = { kind: 'err', msg: msg ?? 'Action failed.' };
+    } finally {
+        busyRowId.value = null;
+        window.setTimeout(() => (flash.value = null), 4000);
+    }
+}
+
+async function addToSite(siteId: string): Promise<void> {
+    if (!detail.value) return;
+    busyRowId.value = 'new';
+    flash.value = null;
+    try {
+        const { data } = await axios.post<{ message: string }>(
+            `/api/listings/${props.listingId}/distributions`,
+            { partner_site_id: siteId },
+        );
+        flash.value = { kind: 'ok', msg: data.message };
+        showAddPicker.value = false;
+        await load();
+    } catch (e: unknown) {
+        const msg = (e as { response?: { data?: { message?: string } } }).response?.data?.message;
+        flash.value = { kind: 'err', msg: msg ?? 'Could not add to partner site.' };
+    } finally {
+        busyRowId.value = null;
+        window.setTimeout(() => (flash.value = null), 4000);
+    }
+}
+
+const pickableSites = computed(() => {
+    if (!detail.value) return [];
+    const already = new Set(detail.value.partner_sites.map((p) => p.partner_site_id));
+    return allSites.value.filter((s) => !already.has(s.id));
+});
 
 onMounted(load);
 
@@ -321,9 +388,45 @@ function activityColor(kind: string): string {
                                         {{ detail.partner_sites.length }} push{{ detail.partner_sites.length === 1 ? '' : 'es' }}
                                     </div>
                                 </div>
+                                <button
+                                    class="btn-ghost text-xs"
+                                    :disabled="busyRowId !== null"
+                                    @click="(showAddPicker = !showAddPicker, loadSites())"
+                                >+ Add to partner site</button>
                             </div>
-                            <div v-if="detail.partner_sites.length === 0" class="panel p-6 text-center text-sm text-deck-dim italic">
-                                Not pushed to any partner sites yet.
+
+                            <!-- Flash bar for distribution actions -->
+                            <div v-if="flash"
+                                 class="mb-2 rounded-md px-3 py-2 text-xs"
+                                 :class="flash.kind === 'ok'
+                                     ? 'border border-floor-win/30 bg-floor-win/10 text-floor-win'
+                                     : 'border border-floor-lose/30 bg-floor-lose/10 text-floor-lose'">
+                                {{ flash.msg }}
+                            </div>
+
+                            <!-- Add-to-site picker -->
+                            <div v-if="showAddPicker" class="deck-card p-3 mb-3">
+                                <div class="text-[10px] font-mono uppercase tracking-wider text-deck-dim mb-2">
+                                    Pick a site
+                                </div>
+                                <div v-if="pickableSites.length === 0" class="text-sm text-deck-dim italic">
+                                    Already pushed to every active partner site.
+                                </div>
+                                <div v-else class="flex flex-wrap gap-2">
+                                    <button
+                                        v-for="s in pickableSites"
+                                        :key="s.id"
+                                        class="btn-ghost text-xs"
+                                        :disabled="busyRowId === 'new'"
+                                        @click="addToSite(s.id)"
+                                    >
+                                        {{ s.name }}
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div v-if="detail.partner_sites.length === 0 && !showAddPicker" class="panel p-6 text-center text-sm text-deck-dim italic">
+                                Not pushed to any partner sites yet. Use "+ Add to partner site" above to push this listing.
                             </div>
                             <div v-else class="grid grid-cols-1 gap-3 sm:grid-cols-2">
                                 <div
@@ -370,7 +473,7 @@ function activityColor(kind: string): string {
                                         <div v-if="ps.last_synced_at">synced {{ fmtDate(ps.last_synced_at) }}</div>
                                     </div>
 
-                                    <div class="mt-3 flex flex-wrap gap-2">
+                                    <div class="mt-3 flex flex-wrap gap-2 items-center">
                                         <a
                                             v-if="ps.external_url"
                                             :href="ps.external_url"
@@ -378,9 +481,29 @@ function activityColor(kind: string): string {
                                             rel="noopener"
                                             class="text-xs text-floor-accent hover:underline"
                                         >Open external →</a>
-                                        <button class="text-xs text-deck-soft hover:text-deck-text" disabled title="Coming in D4">Re-push</button>
-                                        <button class="text-xs text-deck-soft hover:text-deck-text" disabled title="Coming in D4">Pause</button>
-                                        <button class="text-xs text-deck-soft hover:text-deck-text" disabled title="Coming in D4">Edit copy</button>
+                                        <button
+                                            class="text-xs text-deck-soft hover:text-deck-text disabled:opacity-40"
+                                            :disabled="busyRowId !== null"
+                                            @click="distributionAction(ps.id, 'repush')"
+                                        >Re-push</button>
+                                        <button
+                                            v-if="ps.status === 'live'"
+                                            class="text-xs text-deck-soft hover:text-deck-text disabled:opacity-40"
+                                            :disabled="busyRowId !== null"
+                                            @click="distributionAction(ps.id, 'pause')"
+                                        >Pause</button>
+                                        <button
+                                            v-else-if="ps.status === 'paused'"
+                                            class="text-xs text-floor-win hover:text-floor-win/80 disabled:opacity-40"
+                                            :disabled="busyRowId !== null"
+                                            @click="distributionAction(ps.id, 'resume')"
+                                        >Resume</button>
+                                        <button
+                                            class="text-xs text-deck-soft hover:text-deck-text disabled:opacity-40"
+                                            :disabled="busyRowId !== null"
+                                            @click="distributionAction(ps.id, 'sync')"
+                                        >Sync</button>
+                                        <span v-if="busyRowId === ps.id" class="text-[10px] font-mono uppercase tracking-wider text-floor-accent">working…</span>
                                     </div>
                                 </div>
                             </div>
