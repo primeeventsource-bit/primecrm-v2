@@ -289,7 +289,15 @@ final class DashboardController extends Controller
             default => (int) round((24 * 60) / $buckets),
         };
 
-        $start = $now->subMinutes($bucketMinutes * $buckets);
+        // Align $start to the bucket boundary so pre-fill keys match
+        // what the SQL aggregation emits. Without alignment, the SQL
+        // floors to epoch-aligned bucket starts (e.g., :00 for hourly
+        // buckets) while a "now - N minutes" $start lands at e.g. :48,
+        // and key lookups silently miss every row.
+        $bucketSecs = $bucketMinutes * 60;
+        $rawStartEpoch = $now->subMinutes($bucketMinutes * $buckets)->getTimestamp();
+        $startEpoch = (int) floor($rawStartEpoch / $bucketSecs) * $bucketSecs;
+        $start = CarbonImmutable::createFromTimestamp($startEpoch);
 
         // Pre-fill the buckets so empty windows still render the right
         // number of bars (zero-height) — beats a sparkline that visually
@@ -297,7 +305,7 @@ final class DashboardController extends Controller
         $series = [];
         for ($i = 0; $i < $buckets; $i++) {
             $bucketStart = $start->addMinutes($bucketMinutes * $i);
-            $series[$bucketStart->format('Y-m-d H:i:00')] = [
+            $series[(string) $bucketStart->getTimestamp()] = [
                 't' => $bucketStart->toIso8601String(),
                 'v' => 0,
             ];
@@ -307,10 +315,10 @@ final class DashboardController extends Controller
         $rows = $this->sparklineQuery($metric, $tenantId, $start, $bucketMinutes);
 
         foreach ($rows as $row) {
-            // Snap each row's timestamp down to its bucket key.
+            // The SQL aggregation already floored each row to the bucket
+            // boundary; convert that to its UNIX epoch and look it up.
             $ts = CarbonImmutable::parse($row->ts);
-            $bucketEpoch = (int) floor($ts->getTimestamp() / ($bucketMinutes * 60)) * ($bucketMinutes * 60);
-            $key = CarbonImmutable::createFromTimestamp($bucketEpoch)->format('Y-m-d H:i:00');
+            $key = (string) ((int) floor($ts->getTimestamp() / $bucketSecs) * $bucketSecs);
             if (isset($series[$key])) {
                 $series[$key]['v'] = (int) $row->c;
             }
