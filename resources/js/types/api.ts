@@ -37,6 +37,7 @@ export type AgentStatusValue =
 
 export interface AgentStatusRecord {
     agent_id: Uuid;
+    agent_name?: string | null;
     status: AgentStatusValue;
     previous_status: AgentStatusValue | null;
     current_call_id: Uuid | null;

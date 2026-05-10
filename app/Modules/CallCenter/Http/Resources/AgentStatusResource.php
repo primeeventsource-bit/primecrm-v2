@@ -16,6 +16,10 @@ final class AgentStatusResource extends JsonResource
     {
         return [
             'agent_id' => $this->agent_id,
+            // The war room shows agent names, not UUIDs. relationLoaded()
+            // keeps single-record endpoints (like /me) cheap when the
+            // caller didn't ask for it.
+            'agent_name' => $this->whenLoaded('agent', fn () => $this->agent?->name),
             'status' => $this->status?->value,
             'previous_status' => $this->previous_status,
             'current_call_id' => $this->current_call_id,

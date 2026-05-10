@@ -32,6 +32,7 @@ final class AgentStatusController extends Controller
         }
 
         $statuses = AgentStatusRecord::query()
+            ->with('agent:id,name')
             ->orderBy('status_changed_at', 'desc')
             ->get();
 
