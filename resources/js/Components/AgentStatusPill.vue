@@ -8,15 +8,15 @@ const status = ref<AgentStatusValue>('offline');
 const colorClass = computed(() => {
     switch (status.value) {
         case 'available':
-            return 'bg-emerald-500/15 text-emerald-700 ring-emerald-500/30';
+            return 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30';
         case 'on_call':
-            return 'bg-rose-500/15 text-rose-700 ring-rose-500/30 animate-pulse';
+            return 'bg-rose-500/15 text-rose-300 ring-rose-500/30 animate-pulse';
         case 'wrap_up':
-            return 'bg-amber-500/15 text-amber-700 ring-amber-500/30';
+            return 'bg-amber-500/15 text-amber-300 ring-amber-500/30';
         case 'on_break':
-            return 'bg-slate-500/15 text-slate-700 ring-slate-500/30';
+            return 'bg-slate-500/15 text-slate-300 ring-slate-500/30';
         default:
-            return 'bg-slate-300/30 text-slate-500 ring-slate-400/20';
+            return 'bg-slate-700/40 text-slate-400 ring-slate-600/30';
     }
 });
 
@@ -71,7 +71,7 @@ defineExpose({ setStatus, status });
             {{ label }}
         </span>
         <select
-            class="rounded-md border-slate-300 text-xs"
+            class="rounded-md border-deck-line bg-deck-surface text-deck-text text-xs"
             :value="status"
             @change="setStatus(($event.target as HTMLSelectElement).value as AgentStatusValue)"
         >

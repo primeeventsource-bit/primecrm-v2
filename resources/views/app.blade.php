@@ -8,13 +8,17 @@
 
         <title inertia>{{ config('app.name', 'Prime CRM') }}</title>
 
+        {{-- Inter (sans) + JetBrains Mono (numbers / timestamps / codes) --}}
         <link rel="preconnect" href="https://rsms.me/">
         <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap">
 
         @vite(['resources/css/app.css', 'resources/js/app.ts'])
         @inertiaHead
     </head>
-    <body class="h-full bg-slate-50 antialiased">
+    <body class="h-full bg-deck-bg text-deck-text antialiased">
         @inertia
     </body>
 </html>
