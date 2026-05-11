@@ -4,8 +4,16 @@ import axios from 'axios';
 import AppLayout from '@/Layouts/AppLayout.vue';
 import Modal from '@/Components/Modal.vue';
 import CreateAgentForm from '@/Components/Agents/CreateAgentForm.vue';
+import EditAgentForm from '@/Components/Agents/EditAgentForm.vue';
 import { usePage } from '@inertiajs/vue3';
 import type { PageProps } from '@/types/api';
+
+interface AgentCommission {
+    plan_id: string;
+    plan_name: string | null;
+    effective_from: string | null;
+    override_rate_pct: number | null;
+}
 
 interface Agent {
     id: string;
@@ -19,6 +27,11 @@ interface Agent {
     timezone: string | null;
     skills: string[];
     is_panama_based: boolean;
+    pay_type: 'hourly' | 'salary' | 'commission_only' | 'hybrid' | null;
+    base_rate_cents: number | null;
+    pay_currency: string | null;
+    pay_notes: string | null;
+    commission: AgentCommission | null;
     created_at: string | null;
 }
 
@@ -35,6 +48,7 @@ const role = ref('');
 const location = ref<'all' | 'us' | 'panama'>('all');
 const loading = ref(false);
 const createOpen = ref(false);
+const editingAgentId = ref<string | null>(null);
 let timer: number | undefined;
 
 async function load(): Promise<void> {
@@ -77,6 +91,34 @@ function onCreated(): void {
     void load();
 }
 
+function onUpdated(): void {
+    editingAgentId.value = null;
+    void load();
+}
+
+function formatPay(a: Agent): string {
+    if (!a.pay_type || a.pay_type === 'commission_only') return 'Commission only';
+    if (a.base_rate_cents == null) {
+        return a.pay_type === 'salary' ? 'Salary' : 'Hourly';
+    }
+    const amount = a.base_rate_cents / 100;
+    const currency = a.pay_currency ?? 'USD';
+    if (a.pay_type === 'salary') {
+        const annual = amount.toLocaleString(undefined, { maximumFractionDigits: 0 });
+        return `${currency} ${annual} / yr`;
+    }
+    // hourly + hybrid
+    return `${currency} ${amount.toFixed(2)} / hr`;
+}
+
+function formatCommission(a: Agent): string {
+    if (!a.commission) return '—';
+    const override = a.commission.override_rate_pct;
+    return override != null
+        ? `${a.commission.plan_name} (${override}% override)`
+        : (a.commission.plan_name ?? '');
+}
+
 onMounted(load);
 </script>
 
@@ -93,6 +135,15 @@ onMounted(load);
 
             <Modal :open="createOpen" title="Add an agent" @close="createOpen = false">
                 <CreateAgentForm @created="onCreated" @cancel="createOpen = false" />
+            </Modal>
+
+            <Modal :open="editingAgentId !== null" title="Edit agent" @close="editingAgentId = null">
+                <EditAgentForm
+                    v-if="editingAgentId"
+                    :agent-id="editingAgentId"
+                    @updated="onUpdated"
+                    @cancel="editingAgentId = null"
+                />
             </Modal>
 
             <section class="panel mb-4 grid grid-cols-1 gap-3 p-3 md:grid-cols-4">
@@ -135,27 +186,36 @@ onMounted(load);
                             <th class="px-3 py-2 text-left text-xs font-medium uppercase text-slate-500">Email</th>
                             <th class="px-3 py-2 text-left text-xs font-medium uppercase text-slate-500">Role</th>
                             <th class="px-3 py-2 text-left text-xs font-medium uppercase text-slate-500">Location</th>
+                            <th class="px-3 py-2 text-left text-xs font-medium uppercase text-slate-500">Pay</th>
+                            <th class="px-3 py-2 text-left text-xs font-medium uppercase text-slate-500">Commission</th>
                             <th class="px-3 py-2 text-left text-xs font-medium uppercase text-slate-500">Ext.</th>
-                            <th class="px-3 py-2 text-left text-xs font-medium uppercase text-slate-500">Created</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-slate-100 bg-white">
                         <tr v-if="!loading && agents.length === 0">
-                            <td colspan="6" class="px-3 py-12 text-center text-sm text-slate-500">
+                            <td colspan="7" class="px-3 py-12 text-center text-sm text-slate-500">
                                 No agents match those filters.
                                 <span v-if="isSupervisor"> Click <b>+ Add agent</b> to create one.</span>
                             </td>
                         </tr>
-                        <tr v-for="a in agents" :key="a.id" class="hover:bg-slate-50">
+                        <tr
+                            v-for="a in agents"
+                            :key="a.id"
+                            class="hover:bg-slate-50"
+                            :class="isSupervisor ? 'cursor-pointer' : ''"
+                            @click="isSupervisor && (editingAgentId = a.id)"
+                        >
                             <td class="px-3 py-2 text-sm text-slate-900">{{ a.full_name }}</td>
                             <td class="px-3 py-2 text-sm text-slate-700">{{ a.email }}</td>
                             <td class="px-3 py-2"><span class="pill" :class="roleClass(a.role)">{{ a.role.replace(/_/g, ' ') }}</span></td>
                             <td class="px-3 py-2 text-sm text-slate-600">{{ a.is_panama_based ? '🇵🇦 Panama' : '🇺🇸 US' }}</td>
+                            <td class="px-3 py-2 text-sm text-slate-700">{{ formatPay(a) }}</td>
+                            <td class="px-3 py-2 text-sm text-slate-700">{{ formatCommission(a) }}</td>
                             <td class="px-3 py-2 text-sm font-mono text-slate-700">{{ a.extension ?? '—' }}</td>
-                            <td class="px-3 py-2 text-xs text-slate-500">{{ a.created_at?.split('T')[0] }}</td>
                         </tr>
                     </tbody>
                 </table>
+                <p v-if="isSupervisor" class="px-3 py-2 text-xs text-slate-400">Click a row to edit.</p>
             </div>
         </div>
     </AppLayout>

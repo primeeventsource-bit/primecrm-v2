@@ -188,12 +188,60 @@ final class AgentController extends Controller
             'role' => ['sometimes', Rule::in(array_map(fn (UserRole $r) => $r->value, UserRole::cases()))],
             'phone' => ['sometimes', 'nullable', 'string', 'max:32'],
             'extension' => ['sometimes', 'nullable', 'string', 'max:16'],
+            'timezone' => ['sometimes', 'nullable', 'string', 'max:64'],
             'skills' => ['sometimes', 'array'],
             'is_panama_based' => ['sometimes', 'boolean'],
             'status' => ['sometimes', Rule::in(['active', 'suspended', 'terminated'])],
+
+            // Compensation package — same rules as store()
+            'pay_type' => ['sometimes', Rule::in(['hourly', 'salary', 'commission_only', 'hybrid'])],
+            'base_rate' => ['sometimes', 'nullable', 'numeric', 'min:0', 'max:10000000'],
+            'pay_currency' => ['sometimes', 'nullable', 'string', 'size:3'],
+            'pay_notes' => ['sometimes', 'nullable', 'string', 'max:500'],
+
+            // Commission assignment — explicit null clears, omitted means unchanged
+            'commission_plan_id' => ['sometimes', 'nullable', 'uuid', 'exists:commission_plans,id'],
+            'commission_override_rate' => ['sometimes', 'nullable', 'numeric', 'min:0', 'max:100'],
         ]);
 
-        $user->update($validated);
+        // Split column updates (everything that lives on users) from
+        // commission-assignment updates (which involve creating/ending rows
+        // on commission_assignments, not just patching the user).
+        $userUpdates = array_intersect_key($validated, array_flip([
+            'first_name', 'last_name', 'role', 'phone', 'extension',
+            'timezone', 'skills', 'is_panama_based', 'status',
+            'pay_type', 'pay_currency', 'pay_notes',
+        ]));
+
+        // base_rate (dollars decimal) → base_rate_cents.
+        if (array_key_exists('base_rate', $validated)) {
+            $userUpdates['base_rate_cents'] = $validated['base_rate'] === null
+                ? null
+                : (int) round(((float) $validated['base_rate']) * 100);
+        }
+        // commission_only never carries a base rate.
+        $effectivePayType = $userUpdates['pay_type'] ?? $user->pay_type;
+        if ($effectivePayType === 'commission_only') {
+            $userUpdates['base_rate_cents'] = null;
+        }
+
+        DB::transaction(function () use ($user, $userUpdates, $validated): void {
+            if (! empty($userUpdates)) {
+                $user->update($userUpdates);
+            }
+
+            // Commission assignment management. Only acts if the client
+            // explicitly sent commission_plan_id (incl. null to clear).
+            if (array_key_exists('commission_plan_id', $validated)) {
+                $this->applyCommissionAssignment(
+                    user: $user,
+                    newPlanId: $validated['commission_plan_id'],
+                    newOverrideRate: array_key_exists('commission_override_rate', $validated)
+                        ? $validated['commission_override_rate']
+                        : null,
+                );
+            }
+        });
 
         $this->audit->record(
             action: 'agent.updated',
@@ -203,6 +251,64 @@ final class AgentController extends Controller
         );
 
         return response()->json($this->serialize($user->fresh()));
+    }
+
+    /**
+     * Reconcile a user's active commission assignment with the requested
+     * plan + override. History is preserved by ending the prior assignment
+     * (effective_to = yesterday) rather than mutating its plan_id.
+     */
+    private function applyCommissionAssignment(User $user, ?string $newPlanId, float|int|null $newOverrideRate): void
+    {
+        $today = now()->toDateString();
+        $yesterday = now()->subDay()->toDateString();
+
+        $current = CommissionAssignment::query()
+            ->forUser($user->id)
+            ->activeOn($today)
+            ->orderByDesc('effective_from')
+            ->first();
+
+        $currentPlanId = $current?->commission_plan_id;
+        $currentOverride = $current?->overrides['rate_pct'] ?? null;
+
+        // No change requested.
+        if ($newPlanId === $currentPlanId
+            && (float) ($newOverrideRate ?? 0) === (float) ($currentOverride ?? 0)) {
+            return;
+        }
+
+        // Clearing the plan: end the current assignment, create nothing.
+        if ($newPlanId === null) {
+            $current?->update(['effective_to' => $yesterday]);
+
+            return;
+        }
+
+        // Same plan, override changed: patch the existing row in place.
+        if ($current !== null && $current->commission_plan_id === $newPlanId) {
+            $current->update([
+                'overrides' => $newOverrideRate !== null
+                    ? ['rate_pct' => (float) $newOverrideRate]
+                    : null,
+            ]);
+
+            return;
+        }
+
+        // Different plan (or no prior assignment): end old, start new.
+        $current?->update(['effective_to' => $yesterday]);
+
+        CommissionAssignment::query()->create([
+            'tenant_id' => $user->tenant_id,
+            'user_id' => $user->id,
+            'commission_plan_id' => $newPlanId,
+            'effective_from' => $today,
+            'effective_to' => null,
+            'overrides' => $newOverrideRate !== null
+                ? ['rate_pct' => (float) $newOverrideRate]
+                : null,
+        ]);
     }
 
     private function serialize(User $u): array
