@@ -108,4 +108,54 @@ final class InertiaPageController extends Controller
         // "+ Add agent" button on canSupervise().
         return Inertia::render('Agents/Index');
     }
+
+    public function ownerShow(string $id): Response
+    {
+        // Owner profile (timeshare-listing customer-service screen).
+        // The owner is a Lead row in the database; this view is the
+        // post-sale fulfillment-and-relationship surface, distinct
+        // from /leads/{id} which is the pre-sale conversion view.
+        return Inertia::render('Owners/Show', ['ownerId' => $id]);
+    }
+
+    public function listingsIndex(): Response
+    {
+        // Post-sale operational view: pending distribution / live /
+        // with inquiries / booked / expired_unrented.
+        return Inertia::render('Listings/Index');
+    }
+
+    public function listingShow(string $id): Response
+    {
+        return Inertia::render('Listings/Show', ['listingId' => $id]);
+    }
+
+    public function partnerSites(Request $request): Response
+    {
+        // Config + performance metrics for each partner site we push to.
+        // Supervisor-only because credentials live here.
+        if (! $request->user()?->role->canSupervise()) {
+            abort(403);
+        }
+
+        return Inertia::render('PartnerSites/Index');
+    }
+
+    public function bookingsLedger(): Response
+    {
+        // Renter-side bookings ledger — confirmed rentals across all
+        // listings. The success-metric view (D5).
+        return Inertia::render('Bookings/Index');
+    }
+
+    public function complianceHub(Request $request): Response
+    {
+        // Compliance command center — disclosure review + refund cases +
+        // chargebacks + DNC, supervisor-gated (D6).
+        if (! $request->user()?->role->canSupervise()) {
+            abort(403);
+        }
+
+        return Inertia::render('Compliance/Hub');
+    }
 }

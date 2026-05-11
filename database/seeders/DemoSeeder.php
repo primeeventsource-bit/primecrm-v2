@@ -22,11 +22,29 @@ use App\Modules\Commission\Domain\Models\CommissionPlan;
 use App\Modules\Commission\Domain\Models\CommissionPlanRule;
 use App\Modules\Compliance\Domain\Models\ConsentRecord;
 use App\Modules\Compliance\Domain\Models\ContactAttempt;
+use App\Modules\Compliance\Domain\Enums\ChargebackCaseStatus;
+use App\Modules\Compliance\Domain\Enums\ComplianceStatus;
+use App\Modules\Compliance\Domain\Enums\RefundCaseStatus;
+use App\Modules\Compliance\Domain\Enums\RefundReason;
+use App\Modules\Compliance\Domain\Models\ChargebackCase;
+use App\Modules\Compliance\Domain\Models\ComplianceRecording;
 use App\Modules\Compliance\Domain\Models\DncEntry;
+use App\Modules\Compliance\Domain\Models\RefundCase;
 use App\Modules\Customer\Domain\Models\Customer;
 use App\Modules\Dialer\Domain\Models\DialSession;
 use App\Modules\Lead\Domain\Models\Lead;
+use App\Modules\Listing\Domain\Enums\ListingStatus;
+use App\Modules\Listing\Domain\Enums\PartnerSiteListingStatus;
+use App\Modules\Listing\Domain\Enums\PropertyOwnershipType;
+use App\Modules\Listing\Domain\Enums\PropertySeason;
+use App\Modules\Listing\Domain\Enums\RentalInquiryStatus;
+use App\Modules\Listing\Domain\Models\Listing;
+use App\Modules\Listing\Domain\Models\PartnerSite;
+use App\Modules\Listing\Domain\Models\PartnerSiteListing;
+use App\Modules\Listing\Domain\Models\Property;
+use App\Modules\Listing\Domain\Models\RentalInquiry;
 use App\Modules\Payment\Domain\Models\Payment;
+use App\Modules\Sales\Domain\Enums\AgreementStatus;
 use App\Modules\Sales\Domain\Models\Deal;
 use App\Modules\Sales\Domain\Models\DealStageTransition;
 use App\Modules\Tenant\Domain\Models\Tenant;
@@ -128,6 +146,15 @@ final class DemoSeeder extends Seeder
         $this->createCommissionEventsAndCalculations($payments, $deals, $plan, $users);
         $this->createCommissionPayouts($users, $tenant);
 
+        // Timeshare-listing domain layered on top: every closed_won deal
+        // gets a property + a live listing distributed to several
+        // partner sites; recent calls get compliance recordings; a
+        // handful of refund / chargeback cases populate the compliance
+        // queue. Augments the existing deals + bookings rows with
+        // listing-agreement fields rather than introducing parallel
+        // tables.
+        $listingStats = $this->createTimeshareDomain($leads, $deals, $bookings, $calls, $users);
+
         // The last touch: scatter a handful of transitions and payments
         // into the past hour so the dashboard's sparkline, activity
         // ticker, and "deals today" counters render with real numbers
@@ -143,6 +170,12 @@ final class DemoSeeder extends Seeder
         $this->command->info("Deals:           {$deals->count()}");
         $this->command->info("Bookings:        {$bookings->count()}");
         $this->command->info("Payments:        {$payments->count()}");
+        $this->command->info("Properties:      {$listingStats['properties']}");
+        $this->command->info("Listings:        {$listingStats['listings']} ({$listingStats['live_listings']} live)");
+        $this->command->info("Partner sites:   {$listingStats['partner_sites']} ({$listingStats['partner_pushes']} site pushes)");
+        $this->command->info("Inquiries:       {$listingStats['inquiries']}");
+        $this->command->info("Compliance:      {$listingStats['compliance_recordings']} recordings, {$listingStats['compliance_failed']} failed");
+        $this->command->info("Cases:           {$listingStats['refund_cases']} refund / {$listingStats['chargeback_cases']} chargeback");
         $this->command->info('Sign in:         admin@demo.test / password');
     }
 
@@ -1593,6 +1626,670 @@ final class DemoSeeder extends Seeder
                     'cleared_at' => $now->copy()->subMinutes(random_int(1, 30)),
                 ]);
             });
+    }
+
+    /**
+     * Layer the timeshare-listing domain on top of the existing
+     * sales-floor narrative.
+     *
+     * For every closed_won deal, the seeder creates:
+     *   - a Property (the owner's timeshare itself)
+     *   - a Listing (the marketed offering of one or more weeks)
+     *   - 3-5 PartnerSiteListing rows (Airbnb / Vrbo / RedWeek / etc)
+     *   - a ComplianceRecording on the agent's most recent call
+     *
+     * Plus:
+     *   - 5 PartnerSite rows (the channels we push to)
+     *   - 6-10 RentalInquiry rows on live listings
+     *   - A handful of bookings get listing_id + renter-side fields
+     *   - 2 RefundCase rows + 1 ChargebackCase row
+     *
+     * Existing deals are also augmented in-place with listing-fee +
+     * agreement-status + TCPA/verification fields. This is what makes
+     * /api/dashboard/* surface "listings live", "time-to-live",
+     * "compliance pass rate", etc — the metrics the dashboard
+     * rebuild (D7) will read.
+     *
+     * @param  array{admin: User, supervisor: User, qa: User, closers: list<User>, fronters: list<User>}  $users
+     * @return array{
+     *     properties: int,
+     *     listings: int,
+     *     live_listings: int,
+     *     partner_sites: int,
+     *     partner_pushes: int,
+     *     inquiries: int,
+     *     compliance_recordings: int,
+     *     compliance_failed: int,
+     *     refund_cases: int,
+     *     chargeback_cases: int,
+     * }
+     */
+    private function createTimeshareDomain(
+        \Illuminate\Support\Collection $leads,
+        \Illuminate\Support\Collection $deals,
+        \Illuminate\Support\Collection $bookings,
+        \Illuminate\Support\Collection $calls,
+        array $users,
+    ): array {
+        // 1. Partner sites — fixed catalog, tenant-scoped via TenantScoped.
+        $partnerSites = $this->createPartnerSites();
+
+        // 2. Augment closed_won + pitched deals with listing-agreement fields.
+        $this->augmentDealsForListingAgreements($deals);
+
+        // 3. Properties — one per closed_won + pitch_presented lead.
+        $properties = $this->createPropertiesForOwners($leads, $users);
+
+        // 4. Listings — one per closed_won deal, with random partner pushes.
+        [$listings, $liveListings, $partnerPushes] = $this->createListingsAndDistribution(
+            $deals, $properties, $partnerSites,
+        );
+
+        // 5. Rental inquiries on a subset of live listings.
+        $inquiries = $this->createRentalInquiries($liveListings, $partnerSites, $users);
+
+        // 6. Renter-side bookings: graft listing/renter info onto a few
+        //    existing bookings so the renter pipeline shows progress.
+        $this->graftRenterFieldsOntoBookings($bookings, $listings);
+
+        // 7. Compliance recordings on closed_won deals' calls.
+        [$recordings, $failedRecordings] = $this->createComplianceRecordings(
+            $deals, $calls,
+        );
+
+        // 8. Refund + chargeback cases.
+        [$refundCases, $chargebackCases] = $this->createComplianceCases(
+            $deals, $users,
+        );
+
+        return [
+            'properties' => $properties->count(),
+            'listings' => $listings->count(),
+            'live_listings' => $liveListings->count(),
+            'partner_sites' => $partnerSites->count(),
+            'partner_pushes' => $partnerPushes,
+            'inquiries' => $inquiries,
+            'compliance_recordings' => $recordings,
+            'compliance_failed' => $failedRecordings,
+            'refund_cases' => $refundCases,
+            'chargeback_cases' => $chargebackCases,
+        ];
+    }
+
+    /** @return \Illuminate\Support\Collection<int, PartnerSite> */
+    private function createPartnerSites(): \Illuminate\Support\Collection
+    {
+        // Catalog of the major timeshare-rental marketing channels. Real
+        // operators would have credentials and an API endpoint per
+        // site; for the demo we leave api_endpoint null and config
+        // empty so the frontend renders "not configured".
+        $catalog = [
+            ['name' => 'Airbnb',                'slug' => 'airbnb',     'cost' => 0.00],
+            ['name' => 'Vrbo',                  'slug' => 'vrbo',       'cost' => 0.00],
+            ['name' => 'RedWeek',               'slug' => 'redweek',    'cost' => 59.95],
+            ['name' => 'SellMyTimeshareNow',    'slug' => 'smtn',       'cost' => 79.00],
+            ['name' => 'Timeshares.com',        'slug' => 'timeshares', 'cost' => 49.95],
+        ];
+
+        $sites = collect();
+        foreach ($catalog as $row) {
+            $sites->push(PartnerSite::query()->create([
+                'name' => $row['name'],
+                'slug' => $row['slug'],
+                'is_active' => true,
+                'our_cost_per_listing' => $row['cost'],
+                'config' => null,
+            ]));
+        }
+
+        return $sites;
+    }
+
+    /**
+     * Update existing deals in-place with listing-agreement metadata.
+     *
+     * Maps DealStage → AgreementStatus and fills in listing_fee,
+     * payment_status, TCPA + verification markers, and the refund
+     * cooling-off window. Idempotent: re-running just overwrites.
+     */
+    private function augmentDealsForListingAgreements(\Illuminate\Support\Collection $deals): void
+    {
+        foreach ($deals as $deal) {
+            /** @var Deal $deal */
+            $stage = $deal->stage->value;
+
+            // Fee — anchored to the existing total_value so the dashboard
+            // pipeline numbers stay consistent with the per-deal money.
+            $listingFee = (float) $deal->total_value > 0
+                ? (float) $deal->total_value
+                : random_int(2400, 8500);
+
+            // Sales-side stage → fulfillment-side status.
+            $agreementStatus = match ($stage) {
+                'closed_won' => AgreementStatus::Live->value,
+                'closed_lost' => AgreementStatus::Cancelled->value,
+                'negotiating' => AgreementStatus::PaidPendingVerification->value,
+                'pitch_presented' => AgreementStatus::VerbalYes->value,
+                'qualified' => AgreementStatus::Pitched->value,
+                default => AgreementStatus::Pitched->value,
+            };
+
+            $isPaid = in_array($stage, ['closed_won', 'negotiating'], true);
+            $paymentStatus = $isPaid ? 'paid' : 'pending';
+
+            // TCPA + verification: ~95% of paid agreements have full
+            // disclosures; 5% are flagged for review.
+            $tcpaCaptured = $isPaid && random_int(1, 100) <= 95;
+            $verified = $stage === 'closed_won' && random_int(1, 100) <= 90;
+
+            // Refund window: 3-day cooling-off from agreement_signed_at.
+            $signedAt = $stage === 'closed_won' ? $deal->closed_at : null;
+            $refundExpires = $signedAt
+                ? Carbon::parse($signedAt)->addDays(3)
+                : null;
+
+            $deal->update([
+                'listing_fee' => $listingFee,
+                'listing_fee_collected' => $isPaid ? $listingFee : 0,
+                'payment_status' => $paymentStatus,
+                'agreement_status' => $agreementStatus,
+                'listing_term_months' => 12,
+                'term_expires_at' => $signedAt
+                    ? Carbon::parse($signedAt)->addYear()
+                    : null,
+                'refund_window_expires_at' => $refundExpires,
+                'tcpa_disclosure_completed' => $tcpaCaptured,
+                'tcpa_disclosure_completed_at' => $tcpaCaptured && $signedAt
+                    ? Carbon::parse($signedAt)
+                    : null,
+                'verification_call_completed' => $verified,
+                'verification_call_completed_at' => $verified && $signedAt
+                    ? Carbon::parse($signedAt)->addHours(random_int(2, 48))
+                    : null,
+                'agreement_signed_at' => $signedAt?->toDateString(),
+            ]);
+        }
+    }
+
+    /**
+     * One Property per pitch_presented + closed_won lead. Resort + week
+     * details come from the lead's region so consent/DNC/calling-window
+     * narrative stays internally consistent.
+     *
+     * @param  array{admin: User, supervisor: User, qa: User, closers: list<User>, fronters: list<User>}  $users
+     * @return \Illuminate\Support\Collection<int, Property>
+     */
+    private function createPropertiesForOwners(\Illuminate\Support\Collection $leads, array $users): \Illuminate\Support\Collection
+    {
+        $eligibleStatuses = [
+            LeadStatus::PitchPresented->value,
+            LeadStatus::ClosedWon->value,
+        ];
+
+        $resortByState = [
+            'FL' => ['Wyndham Bonnet Creek', 'Marriott Grande Vista', 'Hilton Tuscany Village'],
+            'UT' => ['Westgate Park City', 'Marriott MountainSide'],
+            'HI' => ['Disney Aulani', 'Marriott Ko Olina', 'Hilton Hawaiian Village'],
+            'NV' => ['Hilton Grand Vacations on the Strip', 'Westgate Las Vegas', 'Marriott Grand Chateau'],
+        ];
+
+        $brandFromName = static function (string $name): string {
+            return match (true) {
+                str_contains($name, 'Wyndham') => 'Wyndham',
+                str_contains($name, 'Marriott') => 'Marriott',
+                str_contains($name, 'Hilton') => 'Hilton',
+                str_contains($name, 'Westgate') => 'Westgate',
+                str_contains($name, 'Disney') => 'Disney Vacation Club',
+                default => 'Independent',
+            };
+        };
+
+        $verifier = $users['supervisor'];
+        $properties = collect();
+
+        $leads
+            ->filter(fn (Lead $l) => in_array($l->status->value, $eligibleStatuses, true))
+            ->each(function (Lead $lead) use (&$properties, $resortByState, $brandFromName, $verifier): void {
+                $resortName = $resortByState[$lead->state ?? 'FL'][array_rand($resortByState[$lead->state ?? 'FL'])]
+                    ?? 'Unknown Resort';
+
+                $ownershipType = collect([
+                    PropertyOwnershipType::FixedWeek,
+                    PropertyOwnershipType::FloatingWeek,
+                    PropertyOwnershipType::Points,
+                ])->random();
+
+                // ~85% of pitched/won leads have verified ownership;
+                // the rest are still in verification limbo.
+                $verified = random_int(1, 100) <= 85;
+
+                $properties->push(Property::query()->create([
+                    'owner_id' => $lead->id,
+                    'resort_name' => $resortName,
+                    'resort_brand' => $brandFromName($resortName),
+                    'location_city' => $lead->city ?? 'Orlando',
+                    'location_state' => $lead->state ?? 'FL',
+                    'location_country' => 'USA',
+                    'unit_number' => 'U-'.random_int(100, 999),
+                    'bedrooms' => random_int(1, 3),
+                    'sleeps' => random_int(2, 8),
+                    'view_type' => collect(['ocean', 'garden', 'mountain', 'pool'])->random(),
+                    'ownership_type' => $ownershipType->value,
+                    'points_balance' => $ownershipType === PropertyOwnershipType::Points
+                        ? random_int(50_000, 250_000)
+                        : null,
+                    'fixed_week_number' => $ownershipType === PropertyOwnershipType::FixedWeek
+                        ? random_int(1, 52)
+                        : null,
+                    'season' => collect([
+                        PropertySeason::Platinum, PropertySeason::Gold,
+                        PropertySeason::Silver, PropertySeason::Red,
+                    ])->random()->value,
+                    'ownership_verified' => $verified,
+                    'ownership_verified_at' => $verified
+                        ? now()->subDays(random_int(2, 60))
+                        : null,
+                    'ownership_verified_by' => $verified ? $verifier->id : null,
+                    'rental_allowed_by_resort' => $verified && random_int(1, 100) <= 92,
+                ]));
+            });
+
+        return $properties;
+    }
+
+    /**
+     * Listings — one per closed_won deal, plus per-site distribution.
+     *
+     * @return array{0: \Illuminate\Support\Collection<int, Listing>, 1: \Illuminate\Support\Collection<int, Listing>, 2: int}
+     */
+    private function createListingsAndDistribution(
+        \Illuminate\Support\Collection $deals,
+        \Illuminate\Support\Collection $properties,
+        \Illuminate\Support\Collection $partnerSites,
+    ): array {
+        $propsByOwner = $properties->keyBy('owner_id');
+        $listings = collect();
+        $liveListings = collect();
+        $partnerPushes = 0;
+
+        foreach ($deals as $deal) {
+            /** @var Deal $deal */
+            if ($deal->stage !== DealStage::ClosedWon) {
+                continue;
+            }
+            $property = $propsByOwner[$deal->lead_id] ?? null;
+            if (! $property) {
+                continue;
+            }
+
+            // Asking price + payouts — anchored to the deal's total
+            // for narrative consistency.
+            $asking = (float) $deal->total_value > 0 ? (float) $deal->total_value : random_int(1500, 6500);
+            $ownerPayout = round($asking * 0.65, 2);
+
+            // Most listings are Live; a few are still Pending; a couple
+            // booked already; one or two unrented expired.
+            $statusRoll = random_int(1, 100);
+            $status = match (true) {
+                $statusRoll <= 65 => ListingStatus::Live,
+                $statusRoll <= 78 => ListingStatus::InquiryReceived,
+                $statusRoll <= 85 => ListingStatus::PendingDistribution,
+                $statusRoll <= 92 => ListingStatus::Booked,
+                default => ListingStatus::UnrentedExpired,
+            };
+
+            // Listing window: check-in is somewhere in the next 4-12
+            // months; the listing window expires the day before check-in.
+            $checkIn = now()->addMonths(random_int(2, 10))->addDays(random_int(0, 6));
+            $checkOut = $checkIn->copy()->addDays(7);
+            $expiresAt = $checkIn->copy()->subDay();
+
+            $wentLive = $status->isLive() || $status === ListingStatus::Booked
+                ? Carbon::parse($deal->closed_at ?? now())->addHours(random_int(2, 96))
+                : null;
+
+            $listing = Listing::query()->create([
+                'property_id' => $property->id,
+                'deal_id' => $deal->id,
+                'check_in_date' => $checkIn->toDateString(),
+                'check_out_date' => $checkOut->toDateString(),
+                'asking_price' => $asking,
+                'reserve_price' => round($asking * 0.85, 2),
+                'owner_payout' => $ownerPayout,
+                'our_commission_pct' => 15.00,
+                'status' => $status->value,
+                'went_live_at' => $wentLive,
+                'expires_at' => $expiresAt,
+                'marketing_description' => "Beautiful {$property->bedrooms}-bedroom unit at {$property->resort_name}. Sleeps {$property->sleeps}. Prime week — book early.",
+                'photos' => [
+                    'https://picsum.photos/seed/'.$property->id.'/800/600',
+                    'https://picsum.photos/seed/'.$property->id.'-2/800/600',
+                ],
+            ]);
+            $listings->push($listing);
+            if ($status->isLive() || $status === ListingStatus::Booked) {
+                $liveListings->push($listing);
+            }
+
+            // Distribute to 3-5 random partner sites.
+            $distSites = $partnerSites->shuffle()->take(random_int(3, 5));
+            foreach ($distSites as $site) {
+                /** @var PartnerSite $site */
+                // Per-site status mostly matches the listing's status,
+                // but we sprinkle some site-level rejections / pauses.
+                $siteRoll = random_int(1, 100);
+                $siteStatus = match (true) {
+                    $status === ListingStatus::PendingDistribution => PartnerSiteListingStatus::Pending,
+                    $siteRoll <= 78 => PartnerSiteListingStatus::Live,
+                    $siteRoll <= 88 => PartnerSiteListingStatus::Pending,
+                    $siteRoll <= 96 => PartnerSiteListingStatus::Paused,
+                    default => PartnerSiteListingStatus::Rejected,
+                };
+
+                $pushedAt = $wentLive
+                    ? $wentLive->copy()->subHours(random_int(1, 24))
+                    : now()->subHours(random_int(1, 48));
+                $siteWentLive = $siteStatus === PartnerSiteListingStatus::Live
+                    ? $pushedAt->copy()->addMinutes(random_int(15, 720))
+                    : null;
+
+                PartnerSiteListing::query()->create([
+                    'listing_id' => $listing->id,
+                    'partner_site_id' => $site->id,
+                    'external_listing_id' => $site->slug.'-'.Str::lower(Str::random(10)),
+                    'external_url' => 'https://'.$site->slug.'.example/listings/'.Str::lower(Str::random(8)),
+                    'status' => $siteStatus->value,
+                    'rejection_reason' => $siteStatus === PartnerSiteListingStatus::Rejected
+                        ? 'Photos do not meet quality requirements'
+                        : null,
+                    'view_count' => $siteStatus->isHealthy() ? random_int(15, 320) : 0,
+                    'inquiry_count' => $siteStatus->isHealthy() ? random_int(0, 8) : 0,
+                    'pushed_at' => $pushedAt,
+                    'went_live_at' => $siteWentLive,
+                    'last_synced_at' => now()->subMinutes(random_int(5, 240)),
+                ]);
+                $partnerPushes++;
+            }
+        }
+
+        return [$listings, $liveListings, $partnerPushes];
+    }
+
+    /**
+     * @param  array{admin: User, supervisor: User, qa: User, closers: list<User>, fronters: list<User>}  $users
+     */
+    private function createRentalInquiries(
+        \Illuminate\Support\Collection $liveListings,
+        \Illuminate\Support\Collection $partnerSites,
+        array $users,
+    ): int {
+        if ($liveListings->isEmpty()) {
+            return 0;
+        }
+
+        $renterNames = [
+            'Jenna Patel', 'Mike OConnor', 'Lara Schmidt', 'Tomás Reyes',
+            'Aisha Khan', 'Daniel Wu', 'Eva Petrov', 'Brian Cole',
+            'Riya Sharma', 'Carlos Mendez',
+        ];
+        $handlers = array_merge($users['closers'], $users['fronters']);
+        $count = 0;
+
+        // Inquiries on roughly half the live listings; a few listings
+        // get multiple inquiries.
+        $inquiryListings = $liveListings->shuffle()->take((int) ceil($liveListings->count() * 0.5));
+
+        foreach ($inquiryListings as $listing) {
+            /** @var Listing $listing */
+            $perListing = random_int(1, 3);
+            for ($i = 0; $i < $perListing; $i++) {
+                $name = $renterNames[array_rand($renterNames)];
+                $statusRoll = random_int(1, 100);
+                $status = match (true) {
+                    $statusRoll <= 25 => RentalInquiryStatus::New,
+                    $statusRoll <= 55 => RentalInquiryStatus::Responded,
+                    $statusRoll <= 75 => RentalInquiryStatus::Negotiating,
+                    $statusRoll <= 92 => RentalInquiryStatus::Booked,
+                    default => RentalInquiryStatus::Lost,
+                };
+
+                $createdMinutesAgo = random_int(15, 60 * 24 * 7);
+                $respondedAt = $status === RentalInquiryStatus::New
+                    ? null
+                    : now()->subMinutes(max(1, $createdMinutesAgo - random_int(5, 120)));
+
+                RentalInquiry::query()->create([
+                    'listing_id' => $listing->id,
+                    'partner_site_id' => $partnerSites->random()->id,
+                    'renter_name' => $name,
+                    'renter_email' => Str::lower(str_replace(' ', '.', $name)).'@example.com',
+                    'renter_phone' => '+1'.random_int(2000000000, 9999999999),
+                    'requested_check_in' => $listing->check_in_date,
+                    'requested_check_out' => $listing->check_out_date,
+                    'offered_amount' => round((float) $listing->asking_price * (random_int(80, 105) / 100), 2),
+                    'message' => 'Interested in your listing for our family vacation. Are these dates flexible?',
+                    'status' => $status->value,
+                    'handled_by' => $status !== RentalInquiryStatus::New
+                        ? $handlers[array_rand($handlers)]->id
+                        : null,
+                    'responded_at' => $respondedAt,
+                    'created_at' => now()->subMinutes($createdMinutesAgo),
+                    'updated_at' => $respondedAt ?? now()->subMinutes($createdMinutesAgo),
+                ]);
+                $count++;
+            }
+        }
+
+        return $count;
+    }
+
+    /**
+     * Graft listing-side fields onto ~half the existing bookings so the
+     * new "renter rented an owner's week" view has data while leaving
+     * the legacy bookings intact.
+     */
+    private function graftRenterFieldsOntoBookings(
+        \Illuminate\Support\Collection $bookings,
+        \Illuminate\Support\Collection $listings,
+    ): void {
+        if ($listings->isEmpty()) {
+            return;
+        }
+
+        $renterNames = [
+            'Olivia Bennett', 'Noah Tanaka', 'Sophia Hassan', 'Liam Park',
+            'Mia Rodriguez', 'Ethan Becker', 'Amara Singh', 'Jacob Liu',
+        ];
+
+        $listingsByDealId = $listings->keyBy('deal_id');
+
+        $bookings->each(function (Booking $b) use ($listingsByDealId, $renterNames): void {
+            $listing = $listingsByDealId->get($b->deal_id);
+            if (! $listing) {
+                return;
+            }
+
+            $name = $renterNames[array_rand($renterNames)];
+            $totalPrice = (float) $b->total_price;
+            $ourCommission = round($totalPrice * 0.15, 2);
+            $ownerPayout = round($totalPrice - $ourCommission, 2);
+
+            // Owner gets notified within an hour of booking — almost
+            // always. Sets up the dashboard's "owner_notified Y/N"
+            // service-quality column.
+            $notified = random_int(1, 100) <= 90;
+
+            $b->update([
+                'listing_id' => $listing->id,
+                'renter_name' => $name,
+                'renter_email' => Str::lower(str_replace(' ', '.', $name)).'@example.com',
+                'renter_phone' => '+1'.random_int(2000000000, 9999999999),
+                'owner_payout' => $ownerPayout,
+                'our_commission' => $ourCommission,
+                'owner_notified_at' => $notified
+                    ? Carbon::parse($b->confirmed_at)->addMinutes(random_int(5, 90))
+                    : null,
+                'payment_status' => match ($b->status) {
+                    Booking::STATUS_PAID => 'paid_in_full',
+                    Booking::STATUS_CONFIRMED => 'deposit_paid',
+                    Booking::STATUS_CANCELLED => 'refunded',
+                    default => 'pending',
+                },
+            ]);
+        });
+    }
+
+    /**
+     * @return array{0: int, 1: int} count of recordings, count of failed
+     */
+    private function createComplianceRecordings(
+        \Illuminate\Support\Collection $deals,
+        \Illuminate\Support\Collection $calls,
+    ): array {
+        $callsByLead = $calls->groupBy('lead_id');
+        $count = 0;
+        $failed = 0;
+
+        foreach ($deals as $deal) {
+            /** @var Deal $deal */
+            if ($deal->stage !== DealStage::ClosedWon) {
+                continue;
+            }
+            $leadCalls = $callsByLead->get($deal->lead_id, collect());
+            if ($leadCalls->isEmpty()) {
+                continue;
+            }
+            // Pick the most recent completed call as "the closing call".
+            $call = $leadCalls
+                ->filter(fn (Call $c) => $c->ended_at !== null)
+                ->sortByDesc('ended_at')
+                ->first();
+            if (! $call) {
+                continue;
+            }
+
+            // Disclosure capture distribution — most pass, some pending,
+            // a few fail. Tied to whether the deal has TCPA + verification
+            // already marked complete (set in augmentDealsForListingAgreements).
+            $tcpa = $deal->tcpa_disclosure_completed ?? true;
+            $verified = $deal->verification_call_completed ?? true;
+
+            // 5 disclosures total. If TCPA passed and verified, all
+            // five are usually true. If TCPA passed but not verified,
+            // 1-2 are missing. If TCPA missing entirely, 3+ missing.
+            $missCount = match (true) {
+                ! $tcpa => random_int(3, 5),
+                ! $verified => random_int(1, 2),
+                default => random_int(0, 1),
+            };
+
+            $captures = [
+                'tcpa_consent_captured' => true,
+                'recording_disclosure_made' => true,
+                'no_guarantee_disclosure_made' => true,
+                'refund_policy_disclosure_made' => true,
+                'total_fee_stated_clearly' => true,
+            ];
+            $keys = array_keys($captures);
+            shuffle($keys);
+            for ($i = 0; $i < $missCount; $i++) {
+                $captures[$keys[$i]] = false;
+            }
+
+            $allCaptured = ! in_array(false, $captures, true);
+            $statusRoll = random_int(1, 100);
+            $status = match (true) {
+                $allCaptured && $statusRoll <= 90 => ComplianceStatus::Passed,
+                $allCaptured => ComplianceStatus::PendingReview,
+                $missCount >= 3 => ComplianceStatus::Failed,
+                $statusRoll <= 60 => ComplianceStatus::PendingReview,
+                $statusRoll <= 85 => ComplianceStatus::Failed,
+                default => ComplianceStatus::FlaggedForAudit,
+            };
+
+            ComplianceRecording::query()->create([
+                'call_id' => $call->id,
+                'deal_id' => $deal->id,
+                'user_id' => $deal->agent_id,
+                'tcpa_consent_captured' => $captures['tcpa_consent_captured'],
+                'recording_disclosure_made' => $captures['recording_disclosure_made'],
+                'no_guarantee_disclosure_made' => $captures['no_guarantee_disclosure_made'],
+                'refund_policy_disclosure_made' => $captures['refund_policy_disclosure_made'],
+                'total_fee_stated_clearly' => $captures['total_fee_stated_clearly'],
+                'disclosure_timestamps' => null,
+                'compliance_status' => $status->value,
+                'reviewed_by' => $status->isResolved() ? $deal->fronter_id : null,
+                'reviewed_at' => $status->isResolved() ? now()->subDays(random_int(0, 30)) : null,
+                'review_notes' => $status === ComplianceStatus::Failed
+                    ? 'Closer skipped no-guarantee disclosure during pitch.'
+                    : null,
+            ]);
+            $count++;
+            if ($status === ComplianceStatus::Failed || $status === ComplianceStatus::FlaggedForAudit) {
+                $failed++;
+            }
+        }
+
+        return [$count, $failed];
+    }
+
+    /**
+     * @param  array{admin: User, supervisor: User, qa: User, closers: list<User>, fronters: list<User>}  $users
+     * @return array{0: int, 1: int} refund cases, chargeback cases
+     */
+    private function createComplianceCases(
+        \Illuminate\Support\Collection $deals,
+        array $users,
+    ): array {
+        $closedDeals = $deals
+            ->filter(fn (Deal $d) => $d->stage === DealStage::ClosedWon)
+            ->shuffle();
+
+        if ($closedDeals->count() < 3) {
+            return [0, 0];
+        }
+
+        // Two refund cases — one investigating (open), one denied (closed).
+        $opener = $users['supervisor'];
+        $candidates = $closedDeals->take(3);
+
+        RefundCase::query()->create([
+            'deal_id' => $candidates[0]->id,
+            'opened_by' => $opener->id,
+            'refund_amount' => $candidates[0]->total_value,
+            'reason' => RefundReason::NoRenterFound->value,
+            'owner_statement' => 'No renter inquiry in 60 days; would like a refund of the listing fee.',
+            'status' => RefundCaseStatus::Investigating->value,
+            'opened_at' => now()->subDays(random_int(2, 12)),
+        ]);
+
+        RefundCase::query()->create([
+            'deal_id' => $candidates[1]->id,
+            'opened_by' => $opener->id,
+            'refund_amount' => $candidates[1]->total_value,
+            'reason' => RefundReason::OwnerChangedMind->value,
+            'owner_statement' => 'Decided to keep the week and use it personally.',
+            'status' => RefundCaseStatus::Denied->value,
+            'opened_at' => now()->subDays(random_int(20, 45)),
+            'resolved_at' => now()->subDays(random_int(10, 19)),
+        ]);
+
+        // One chargeback — evidence_gathering, due in 5 days.
+        ChargebackCase::query()->create([
+            'deal_id' => $candidates[2]->id,
+            'processor_case_id' => 'dp_'.Str::lower(Str::random(20)),
+            'disputed_amount' => $candidates[2]->total_value,
+            'reason_code' => '4855',                         // Goods/services not provided
+            'respond_by_date' => now()->addDays(random_int(3, 7))->toDateString(),
+            'status' => ChargebackCaseStatus::EvidenceGathering->value,
+            'evidence_attached' => [
+                'signed_contract_id' => null,
+                'compliance_recording_ids' => [],
+                'partner_site_screenshots' => [],
+            ],
+        ]);
+
+        return [2, 1];
     }
 
     // ---------------------------------------------------------------------

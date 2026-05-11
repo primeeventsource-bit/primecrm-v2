@@ -34,6 +34,8 @@ const sections = computed<NavSection[]>(() => [
             { href: '/dialer/console', label: 'Dialer', icon: '☎', show: true },
             { href: '/leads', label: 'Leads', icon: '◐', show: true },
             { href: '/customers', label: 'Customers', icon: '◍', show: true },
+            { href: '/listings', label: 'Listings', icon: '▣', show: true },
+            { href: '/bookings', label: 'Bookings', icon: '◆', show: true },
             { href: '/pipeline', label: 'Pipeline', icon: '▤', show: true },
             { href: '/booking/search', label: 'Inventory', icon: '◫', show: true },
         ],
@@ -44,7 +46,8 @@ const sections = computed<NavSection[]>(() => [
             { href: '/agents', label: 'Agents', icon: '◊', show: true },
             { href: '/supervisor/war-room', label: 'War Room', icon: '⌖', show: isSupervisor.value },
             { href: '/commission/payouts', label: 'Payouts', icon: '$', show: true },
-            { href: '/compliance/dnc', label: 'Compliance', icon: '⊘', show: isSupervisor.value },
+            { href: '/partner-sites', label: 'Partner sites', icon: '◇', show: isSupervisor.value },
+            { href: '/compliance', label: 'Compliance', icon: '⊘', show: isSupervisor.value },
         ],
     },
 ]);
