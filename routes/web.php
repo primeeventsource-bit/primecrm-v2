@@ -50,4 +50,8 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
 
     // Renter-side bookings ledger (D5).
     Route::get('/bookings', [InertiaPageController::class, 'bookingsLedger'])->name('bookings.ledger');
+
+    // Compliance command center (D6) — recordings queue + refund cases +
+    // chargebacks + DNC, all in one tabbed hub.
+    Route::get('/compliance', [InertiaPageController::class, 'complianceHub'])->name('compliance.hub');
 });

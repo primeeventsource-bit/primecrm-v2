@@ -147,4 +147,15 @@ final class InertiaPageController extends Controller
         // listings. The success-metric view (D5).
         return Inertia::render('Bookings/Index');
     }
+
+    public function complianceHub(Request $request): Response
+    {
+        // Compliance command center — disclosure review + refund cases +
+        // chargebacks + DNC, supervisor-gated (D6).
+        if (! $request->user()?->role->canSupervise()) {
+            abort(403);
+        }
+
+        return Inertia::render('Compliance/Hub');
+    }
 }

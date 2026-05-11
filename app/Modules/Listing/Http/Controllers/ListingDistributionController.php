@@ -61,6 +61,16 @@ final class ListingDistributionController extends Controller
             return response()->json(['message' => 'Partner site is inactive'], 422);
         }
 
+        // Compliance gate (D6): cannot distribute a listing whose
+        // listing-fee agreement hasn't cleared verification. This is
+        // the enforcement counterpart to the disclosure-checklist UI
+        // — without it, an agent could collect a fee and push to
+        // partner sites before the verifier callback completed.
+        $gate = $this->verificationGate($listing);
+        if ($gate !== null) {
+            return $gate;
+        }
+
         // If we've already pushed this listing to this site, no-op-bail.
         // Re-pushing an existing row is a separate endpoint.
         $existing = PartnerSiteListing::query()
@@ -95,6 +105,16 @@ final class ListingDistributionController extends Controller
 
         if (! $listing || ! $row || ! $site) {
             return response()->json(['message' => 'Distribution row not found'], 404);
+        }
+
+        // Compliance gate (D6) — same rule as for the initial push:
+        // verification must be complete before any external surface
+        // gets a fresh outbound call. Pause/resume/sync don't gate
+        // because they don't re-publish (pause/resume are status-
+        // only toggles; sync only reads).
+        $gate = $this->verificationGate($listing);
+        if ($gate !== null) {
+            return $gate;
         }
 
         $result = $this->distributor->push($listing, $site, $row);
@@ -139,6 +159,54 @@ final class ListingDistributionController extends Controller
         $result = $this->distributor->sync($listing, $site, $row);
 
         return $this->respond($result, $row->refresh());
+    }
+
+    /**
+     * Compliance gate — refuse distribution unless the underlying
+     * listing-fee agreement has cleared verification.
+     *
+     * Returns null when the gate is open; returns a 422 JsonResponse
+     * when blocked, so callers can pass it straight back.
+     *
+     * Rules (D6):
+     *   - Both tcpa_disclosure_completed AND verification_call_completed
+     *     must be true on the parent deal.
+     *   - Agreement_status must NOT be cancelled / refunded / charged_back.
+     */
+    private function verificationGate(Listing $listing): ?JsonResponse
+    {
+        $deal = $listing->deal()->first();
+
+        if ($deal === null) {
+            return response()->json([
+                'message' => 'Cannot distribute: listing has no associated agreement.',
+                'code' => 'no_agreement',
+            ], 422);
+        }
+
+        if (! $deal->tcpa_disclosure_completed) {
+            return response()->json([
+                'message' => 'Cannot distribute: TCPA disclosures not captured on the closing call. Verifier must complete the disclosure checklist first.',
+                'code' => 'tcpa_disclosure_missing',
+            ], 422);
+        }
+
+        if (! $deal->verification_call_completed) {
+            return response()->json([
+                'message' => 'Cannot distribute: verification callback has not been completed. Agreement remains in paid_pending_verification until the verifier signs off.',
+                'code' => 'verification_call_missing',
+            ], 422);
+        }
+
+        $blockedAgreementStatuses = ['cancelled', 'refunded', 'charged_back'];
+        if (in_array((string) ($deal->agreement_status?->value ?? ''), $blockedAgreementStatuses, true)) {
+            return response()->json([
+                'message' => "Cannot distribute: agreement is in '{$deal->agreement_status->value}' status.",
+                'code' => 'agreement_terminal',
+            ], 422);
+        }
+
+        return null;
     }
 
     /**
