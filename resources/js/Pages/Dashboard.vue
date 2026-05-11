@@ -192,13 +192,161 @@ async function loadLeaderboard(): Promise<void> {
 // leaderboard, and the sparkline all advance in lockstep with the
 // summary cards rather than flashing piecemeal.
 async function loadAll(): Promise<void> {
-    await Promise.all([load(), loadActivity(), loadSparkline(), loadLeaderboard()]);
+    await Promise.all([
+        load(), loadActivity(), loadSparkline(), loadLeaderboard(),
+        loadListingHealth(), loadPartnerHealth(), loadBookingPipeline(),
+        loadCompliancePosture(), loadOwnerSignals(),
+    ]);
+}
+
+/* ------------------------------------------------------------------
+ | Listing-service health (D7)
+ |
+ | Five parallel fetches feed the second half of the dashboard. They're
+ | refreshed in lockstep with the call-floor summary (loadAll picks
+ | them up). Empty state on any of them just hides the panel — we'd
+ | rather a missing panel than a broken page.
+ |------------------------------------------------------------------ */
+
+interface ListingHealth {
+    listings_live: { count: number; inventory_value: number };
+    bookings_this_week: { count: number; rental_value: number; commission: number; owners_notified: number };
+    time_to_live: { median_seconds: number | null; p90_seconds: number | null; sample_size: number };
+    reversal_rate: { rate: number | null; refund_cases: number; chargeback_cases: number; cleared_payments: number };
+    going_dark_soon: Array<{ id: string; resort_name: string; state: string; check_in_date: string; asking_price: number; days_until: number; owner_id: string; owner_name: string }>;
+    by_state: Array<{ state: string; count: number; value: number }>;
+}
+interface PartnerHealthRow {
+    id: string;
+    name: string;
+    slug: string;
+    is_active: boolean;
+    pushes_total: number;
+    pushes_live: number;
+    pushes_rejected: number;
+    avg_ttl_seconds: number | null;
+    views: number;
+    inquiries: number;
+    bookings: number;
+    conversion_rate: number | null;
+}
+interface FunnelCounts {
+    inquiries: number;
+    negotiating: number;
+    booked: number;
+    completed: number;
+    lost: number;
+}
+interface BookingPipeline {
+    this_week: FunnelCounts;
+    last_week: FunnelCounts;
+    stale_inquiries: number;
+    avg_days_to_book: number | null;
+    avg_days_sample: number;
+}
+interface CloserRefundRow {
+    id: string;
+    name: string;
+    closes: number;
+    refund_cases: number;
+    refund_rate: number;
+}
+interface CompliancePosture {
+    disclosure_pass_rate: number | null;
+    disclosure_target: number;
+    disclosure_breakdown: { total: number; passed: number; failed: number; flagged: number; pending: number };
+    open_refunds_by_reason: Array<{ reason: string; count: number; amount: number }>;
+    open_chargebacks: Array<{ id: string; processor_case_id: string; amount: number; respond_by_date: string; status: string; days_until_due: number | null }>;
+    closer_refund_rates: CloserRefundRow[];
+}
+interface OwnerSignals {
+    relist_rate: number | null;
+    multi_deal_owners: number;
+    total_owners_with_deals: number;
+    avg_lifetime_fees: number | null;
+    upsell_opportunities: Array<{ owner_id: string; owner_name: string; properties: number; active_listings: number; untapped: number }>;
+}
+
+const listingHealth = ref<ListingHealth | null>(null);
+const partnerHealth = ref<PartnerHealthRow[]>([]);
+const bookingPipeline = ref<BookingPipeline | null>(null);
+const compliancePosture = ref<CompliancePosture | null>(null);
+const ownerSignals = ref<OwnerSignals | null>(null);
+
+async function loadListingHealth(): Promise<void> {
+    try {
+        const { data } = await axios.get<ListingHealth>('/api/dashboard/listing-health');
+        listingHealth.value = data;
+    } catch { listingHealth.value = null; }
+}
+async function loadPartnerHealth(): Promise<void> {
+    try {
+        const { data } = await axios.get<{ data: PartnerHealthRow[] }>('/api/dashboard/partner-health');
+        partnerHealth.value = data.data;
+    } catch { partnerHealth.value = []; }
+}
+async function loadBookingPipeline(): Promise<void> {
+    try {
+        const { data } = await axios.get<BookingPipeline>('/api/dashboard/booking-pipeline');
+        bookingPipeline.value = data;
+    } catch { bookingPipeline.value = null; }
+}
+async function loadCompliancePosture(): Promise<void> {
+    try {
+        const { data } = await axios.get<CompliancePosture>('/api/dashboard/compliance-posture');
+        compliancePosture.value = data;
+    } catch { compliancePosture.value = null; }
+}
+async function loadOwnerSignals(): Promise<void> {
+    try {
+        const { data } = await axios.get<OwnerSignals>('/api/dashboard/owner-signals');
+        ownerSignals.value = data;
+    } catch { ownerSignals.value = null; }
+}
+
+/* ------------------------------------------------------------------
+ | Domain-aware formatters
+ |------------------------------------------------------------------ */
+
+function fmtDuration(seconds: number | null): string {
+    if (seconds === null) return '—';
+    if (seconds < 60) return `${seconds}s`;
+    if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+    if (seconds < 86400) return `${(seconds / 3600).toFixed(1)}h`;
+    return `${(seconds / 86400).toFixed(1)}d`;
+}
+
+function ttlColor(seconds: number | null): string {
+    if (seconds === null) return 'text-deck-dim';
+    if (seconds < 48 * 3600) return 'text-floor-win';
+    if (seconds < 5 * 86400) return 'text-floor-accent';
+    return 'text-floor-lose';
+}
+
+function reversalColor(rate: number | null): string {
+    if (rate === null) return 'text-deck-dim';
+    if (rate < 0.01) return 'text-floor-win';
+    if (rate < 0.02) return 'text-floor-accent';
+    return 'text-floor-lose';
+}
+
+function chargebackUrgency(days: number | null): string {
+    if (days === null) return 'text-deck-soft';
+    if (days < 0) return 'text-floor-lose font-bold';
+    if (days <= 3) return 'text-floor-lose';
+    if (days <= 7) return 'text-floor-accent';
+    return 'text-deck-soft';
 }
 
 onMounted(() => {
     void loadActivity();
     void loadSparkline();
     void loadLeaderboard();
+    void loadListingHealth();
+    void loadPartnerHealth();
+    void loadBookingPipeline();
+    void loadCompliancePosture();
+    void loadOwnerSignals();
 });
 </script>
 
@@ -335,10 +483,10 @@ onMounted(() => {
                 <!-- Secondary trio -->
                 <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 lg:col-span-2">
                     <div class="deck-card p-4">
-                        <div class="deck-label">Deals closed</div>
+                        <div class="deck-label">Listing fees</div>
                         <div class="mt-2 deck-num-stat text-floor-win">{{ num(summary?.pipeline.deals_closed) }}</div>
                         <div class="mt-1 text-xs font-mono tabular-nums text-deck-dim">
-                            {{ pct(summary?.pipeline.conversion_rate) }} conversion
+                            {{ pct(summary?.pipeline.conversion_rate) }} pitch-to-listing
                         </div>
                     </div>
                     <div class="deck-card p-4">
@@ -476,6 +624,327 @@ onMounted(() => {
                 <p class="mt-2 text-sm text-deck-soft italic">
                     Time-series view is on deck. Until then, the period nav above is your toolbar.
                 </p>
+            </section>
+
+            <!-- ════════════════════════════════════════════════════════════════
+                 LISTING SERVICE HEALTH (D7)
+                 The post-sale side of the business. Above = call floor;
+                 below = is the service we're selling actually delivering?
+                 ════════════════════════════════════════════════════════════════ -->
+            <section v-if="tab !== 'chart'" class="pt-2">
+                <div class="flex items-center gap-2 mb-3">
+                    <span class="inline-block h-2 w-2 rounded-sm bg-floor-info"></span>
+                    <h2 class="text-base font-semibold text-deck-text">Listing service health</h2>
+                    <span class="text-[10px] font-mono uppercase tracking-[0.18em] text-deck-dim">
+                        post-sale delivery
+                    </span>
+                </div>
+
+                <!-- Row 2 hero KPIs — §3.1 of the prompt -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+                    <!-- Listings live -->
+                    <div class="deck-card p-4">
+                        <div class="deck-label">Listings live</div>
+                        <div class="mt-2 deck-num-stat text-floor-win">
+                            {{ listingHealth?.listings_live.count ?? '—' }}
+                        </div>
+                        <div class="mt-1 text-xs font-mono tabular-nums text-deck-dim">
+                            {{ listingHealth ? fmtMoney(listingHealth.listings_live.inventory_value) : '—' }} inventory
+                        </div>
+                    </div>
+                    <!-- Bookings this week -->
+                    <div class="deck-card p-4">
+                        <div class="deck-label">Bookings this week</div>
+                        <div class="mt-2 deck-num-stat text-floor-win">
+                            {{ listingHealth?.bookings_this_week.count ?? '—' }}
+                        </div>
+                        <div class="mt-1 text-xs font-mono tabular-nums text-deck-dim">
+                            {{ listingHealth ? fmtMoney(listingHealth.bookings_this_week.commission) : '—' }} earned
+                        </div>
+                    </div>
+                    <!-- Time to live -->
+                    <div class="deck-card p-4">
+                        <div class="deck-label">Time to live (median)</div>
+                        <div class="mt-2 deck-num-stat" :class="ttlColor(listingHealth?.time_to_live.median_seconds ?? null)">
+                            {{ fmtDuration(listingHealth?.time_to_live.median_seconds ?? null) }}
+                        </div>
+                        <div class="mt-1 text-xs font-mono tabular-nums text-deck-dim">
+                            p90 {{ fmtDuration(listingHealth?.time_to_live.p90_seconds ?? null) }}
+                            <span v-if="(listingHealth?.time_to_live.sample_size ?? 0) > 0">
+                                · n={{ listingHealth?.time_to_live.sample_size }}
+                            </span>
+                        </div>
+                    </div>
+                    <!-- Refund / chargeback rate -->
+                    <div class="deck-card p-4">
+                        <div class="deck-label">Refund / chargeback rate</div>
+                        <div class="mt-2 deck-num-stat" :class="reversalColor(listingHealth?.reversal_rate.rate ?? null)">
+                            {{ listingHealth?.reversal_rate.rate !== null && listingHealth?.reversal_rate.rate !== undefined ? pct(listingHealth.reversal_rate.rate) : '—' }}
+                        </div>
+                        <div class="mt-1 text-xs font-mono tabular-nums text-deck-dim">
+                            <span v-if="listingHealth">
+                                {{ listingHealth.reversal_rate.refund_cases }}R · {{ listingHealth.reversal_rate.chargeback_cases }}C / {{ listingHealth.reversal_rate.cleared_payments }} cleared
+                            </span>
+                            <span v-else>—</span>
+                            <span class="block text-[10px] text-deck-dim">target &lt; 1% · alert &gt; 2%</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Two-column row: Going-dark-soon + Booking pipeline funnel -->
+                <div class="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-4">
+                    <!-- Going dark soon — listings within 14 days, no booking -->
+                    <div class="deck-card overflow-hidden">
+                        <header class="flex items-center justify-between border-b border-deck-line px-4 py-3">
+                            <div>
+                                <div class="text-sm font-semibold text-deck-text">Going dark soon</div>
+                                <div class="text-[10px] font-mono uppercase tracking-wider text-deck-dim">≤14 days · no booking</div>
+                            </div>
+                            <span v-if="listingHealth?.going_dark_soon.length" class="pill bg-floor-lose/15 text-floor-lose ring-1 ring-floor-lose/30 font-mono">
+                                {{ listingHealth.going_dark_soon.length }}
+                            </span>
+                        </header>
+                        <div v-if="!listingHealth?.going_dark_soon.length" class="px-4 py-8 text-center text-sm text-deck-dim italic">
+                            Nothing about to expire unrented. Clean board.
+                        </div>
+                        <ul v-else class="divide-y divide-deck-line/50">
+                            <li v-for="l in listingHealth.going_dark_soon" :key="l.id"
+                                class="px-4 py-2 flex items-center justify-between hover:bg-deck-raised/40">
+                                <div class="min-w-0 flex-1">
+                                    <Link :href="`/listings/${l.id}`" class="text-sm text-deck-text hover:text-floor-accent truncate block">
+                                        {{ l.resort_name }}
+                                    </Link>
+                                    <div class="text-[11px] text-deck-soft">
+                                        {{ l.owner_name }} · {{ l.state }}
+                                    </div>
+                                </div>
+                                <div class="text-right ml-3">
+                                    <div class="font-mono text-sm" :class="l.days_until <= 3 ? 'text-floor-lose' : 'text-floor-accent'">
+                                        {{ l.days_until }}d
+                                    </div>
+                                    <div class="font-mono text-[10px] text-deck-dim">{{ fmtMoney(l.asking_price) }}</div>
+                                </div>
+                            </li>
+                        </ul>
+                    </div>
+
+                    <!-- Booking pipeline funnel — 2 columns wide -->
+                    <div class="deck-card overflow-hidden xl:col-span-2">
+                        <header class="flex items-center justify-between border-b border-deck-line px-4 py-3">
+                            <div>
+                                <div class="text-sm font-semibold text-deck-text">Booking pipeline</div>
+                                <div class="text-[10px] font-mono uppercase tracking-wider text-deck-dim">
+                                    this week · last week comparison
+                                </div>
+                            </div>
+                            <div v-if="bookingPipeline" class="text-right text-xs">
+                                <span v-if="bookingPipeline.stale_inquiries > 0" class="pill bg-floor-lose/15 text-floor-lose ring-1 ring-floor-lose/30 font-mono">
+                                    {{ bookingPipeline.stale_inquiries }} stale (&gt;4h)
+                                </span>
+                                <span v-if="bookingPipeline.avg_days_to_book !== null" class="ml-2 text-deck-soft">
+                                    avg {{ bookingPipeline.avg_days_to_book }}d to book
+                                </span>
+                            </div>
+                        </header>
+                        <div v-if="!bookingPipeline" class="px-4 py-8 text-center text-sm text-deck-dim italic">Loading…</div>
+                        <div v-else class="p-4">
+                            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                <div v-for="stage in (['inquiries','negotiating','booked','completed'] as const)" :key="stage" class="text-center">
+                                    <div class="deck-label">{{ stage }}</div>
+                                    <div class="mt-1 deck-num text-2xl"
+                                         :class="stage === 'completed' ? 'text-floor-win' : stage === 'booked' ? 'text-floor-info' : 'text-deck-text'">
+                                        {{ bookingPipeline.this_week[stage] }}
+                                    </div>
+                                    <div class="text-[10px] font-mono uppercase tracking-wider text-deck-dim mt-0.5">
+                                        last wk {{ bookingPipeline.last_week[stage] }}
+                                        <span v-if="bookingPipeline.this_week[stage] > bookingPipeline.last_week[stage]" class="text-floor-win">▲</span>
+                                        <span v-else-if="bookingPipeline.this_week[stage] < bookingPipeline.last_week[stage]" class="text-floor-lose">▼</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div v-if="bookingPipeline.this_week.lost > 0" class="mt-3 pt-3 border-t border-deck-line/50 text-xs text-deck-dim">
+                                <span class="font-mono">{{ bookingPipeline.this_week.lost }}</span> lost this week
+                                <span class="ml-2">(last wk {{ bookingPipeline.last_week.lost }})</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Partner site health table -->
+                <div class="deck-card overflow-hidden mb-4">
+                    <header class="flex items-center justify-between border-b border-deck-line px-4 py-3">
+                        <div>
+                            <div class="text-sm font-semibold text-deck-text">Partner site health</div>
+                            <div class="text-[10px] font-mono uppercase tracking-wider text-deck-dim">
+                                where listings are getting traction
+                            </div>
+                        </div>
+                        <Link href="/partner-sites" class="text-xs text-floor-accent hover:underline">Config →</Link>
+                    </header>
+                    <table v-if="partnerHealth.length" class="min-w-full text-sm">
+                        <thead>
+                            <tr class="border-b border-deck-line">
+                                <th class="px-4 py-2 text-left text-[10px] font-mono uppercase tracking-wider text-deck-dim">Site</th>
+                                <th class="px-4 py-2 text-right text-[10px] font-mono uppercase tracking-wider text-deck-dim">Pushes</th>
+                                <th class="px-4 py-2 text-right text-[10px] font-mono uppercase tracking-wider text-deck-dim">Live</th>
+                                <th class="px-4 py-2 text-right text-[10px] font-mono uppercase tracking-wider text-deck-dim">Avg TTL</th>
+                                <th class="px-4 py-2 text-right text-[10px] font-mono uppercase tracking-wider text-deck-dim">Views</th>
+                                <th class="px-4 py-2 text-right text-[10px] font-mono uppercase tracking-wider text-deck-dim">Inquiries</th>
+                                <th class="px-4 py-2 text-right text-[10px] font-mono uppercase tracking-wider text-deck-dim">Bookings</th>
+                                <th class="px-4 py-2 text-right text-[10px] font-mono uppercase tracking-wider text-deck-dim">Conv.</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-deck-line/50">
+                            <tr v-for="p in partnerHealth" :key="p.id" class="hover:bg-deck-raised/40">
+                                <td class="px-4 py-2">
+                                    <span class="inline-block h-2 w-2 rounded-full mr-2"
+                                          :class="p.is_active && p.pushes_live > 0 ? 'bg-floor-win'
+                                              : p.pushes_rejected > 0 ? 'bg-floor-lose' : 'bg-deck-dim'"></span>
+                                    <span class="text-deck-text">{{ p.name }}</span>
+                                    <span v-if="!p.is_active" class="ml-2 text-[10px] font-mono uppercase tracking-wider text-deck-dim">inactive</span>
+                                </td>
+                                <td class="px-4 py-2 text-right deck-num">{{ p.pushes_total || '—' }}</td>
+                                <td class="px-4 py-2 text-right deck-num text-floor-win">{{ p.pushes_live || '—' }}</td>
+                                <td class="px-4 py-2 text-right font-mono tabular-nums text-xs"
+                                    :class="ttlColor(p.avg_ttl_seconds)">
+                                    {{ fmtDuration(p.avg_ttl_seconds) }}
+                                </td>
+                                <td class="px-4 py-2 text-right deck-num">{{ p.views || '—' }}</td>
+                                <td class="px-4 py-2 text-right deck-num text-floor-accent">{{ p.inquiries || '—' }}</td>
+                                <td class="px-4 py-2 text-right deck-num text-floor-info">{{ p.bookings || '—' }}</td>
+                                <td class="px-4 py-2 text-right font-mono tabular-nums text-xs"
+                                    :class="p.conversion_rate !== null && p.conversion_rate >= 0.2 ? 'text-floor-win' : p.conversion_rate !== null ? 'text-deck-soft' : 'text-deck-dim'">
+                                    {{ p.conversion_rate !== null ? pct(p.conversion_rate) : '—' }}
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div v-else class="px-4 py-8 text-center text-sm text-deck-dim italic">
+                        No partner-site activity yet.
+                    </div>
+                </div>
+
+                <!-- Compliance posture + Owner signals — two columns -->
+                <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                    <!-- Compliance posture -->
+                    <div class="deck-card overflow-hidden">
+                        <header class="flex items-center justify-between border-b border-deck-line px-4 py-3">
+                            <div>
+                                <div class="text-sm font-semibold text-deck-text">Compliance posture</div>
+                                <div class="text-[10px] font-mono uppercase tracking-wider text-deck-dim">30-day window</div>
+                            </div>
+                            <Link href="/compliance" class="text-xs text-floor-accent hover:underline">Open hub →</Link>
+                        </header>
+                        <div v-if="!compliancePosture" class="px-4 py-8 text-center text-sm text-deck-dim italic">Loading…</div>
+                        <div v-else class="p-4 space-y-4">
+                            <!-- Pass rate -->
+                            <div class="flex items-center justify-between">
+                                <div>
+                                    <div class="deck-label">Disclosure pass rate</div>
+                                    <div class="mt-1 deck-num text-3xl"
+                                         :class="compliancePosture.disclosure_pass_rate === null ? 'text-deck-dim'
+                                             : compliancePosture.disclosure_pass_rate >= compliancePosture.disclosure_target ? 'text-floor-win'
+                                             : compliancePosture.disclosure_pass_rate >= 0.85 ? 'text-floor-accent' : 'text-floor-lose'">
+                                        {{ pct(compliancePosture.disclosure_pass_rate) }}
+                                    </div>
+                                    <div class="text-[10px] font-mono uppercase tracking-wider text-deck-dim">
+                                        target ≥ {{ pct(compliancePosture.disclosure_target) }}
+                                    </div>
+                                </div>
+                                <div class="text-right text-xs space-y-0.5">
+                                    <div class="text-floor-win">{{ compliancePosture.disclosure_breakdown.passed }} passed</div>
+                                    <div class="text-floor-accent">{{ compliancePosture.disclosure_breakdown.pending }} pending</div>
+                                    <div class="text-floor-lose">{{ compliancePosture.disclosure_breakdown.failed }} failed</div>
+                                    <div class="text-floor-lose">{{ compliancePosture.disclosure_breakdown.flagged }} flagged</div>
+                                </div>
+                            </div>
+
+                            <!-- Open chargebacks (most urgent) -->
+                            <div v-if="compliancePosture.open_chargebacks.length" class="border-t border-deck-line/50 pt-3">
+                                <div class="deck-label mb-2">Open chargebacks · respond-by</div>
+                                <ul class="space-y-1 text-xs">
+                                    <li v-for="cb in compliancePosture.open_chargebacks.slice(0, 5)" :key="cb.id"
+                                        class="flex items-center justify-between">
+                                        <span class="font-mono text-deck-soft">{{ cb.processor_case_id }}</span>
+                                        <span class="font-mono" :class="chargebackUrgency(cb.days_until_due)">
+                                            {{ cb.respond_by_date }}
+                                            <span v-if="cb.days_until_due !== null && cb.days_until_due < 0">OVERDUE</span>
+                                            <span v-else-if="cb.days_until_due !== null">({{ cb.days_until_due }}d)</span>
+                                        </span>
+                                    </li>
+                                </ul>
+                            </div>
+
+                            <!-- Inverted closer leaderboard -->
+                            <div v-if="compliancePosture.closer_refund_rates.length" class="border-t border-deck-line/50 pt-3">
+                                <div class="deck-label mb-2 text-floor-lose">Closers by refund rate · 90d</div>
+                                <p class="text-[10px] font-mono uppercase tracking-wider text-deck-dim mb-2">
+                                    inverted leaderboard — bottom of list = coaching priority
+                                </p>
+                                <ul class="space-y-1 text-xs">
+                                    <li v-for="c in compliancePosture.closer_refund_rates.slice(0, 6)" :key="c.id"
+                                        class="flex items-center justify-between">
+                                        <span class="text-deck-text">{{ c.name }}</span>
+                                        <span class="font-mono tabular-nums"
+                                              :class="c.refund_rate > 0.05 ? 'text-floor-lose' : c.refund_rate > 0.02 ? 'text-floor-accent' : 'text-deck-soft'">
+                                            {{ pct(c.refund_rate) }} ({{ c.refund_cases }}/{{ c.closes }})
+                                        </span>
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Owner success signals -->
+                    <div class="deck-card overflow-hidden">
+                        <header class="border-b border-deck-line px-4 py-3">
+                            <div class="text-sm font-semibold text-deck-text">Owner success signals</div>
+                            <div class="text-[10px] font-mono uppercase tracking-wider text-deck-dim">
+                                are owners coming back?
+                            </div>
+                        </header>
+                        <div v-if="!ownerSignals" class="px-4 py-8 text-center text-sm text-deck-dim italic">Loading…</div>
+                        <div v-else class="p-4 space-y-4">
+                            <div class="grid grid-cols-3 gap-3 text-center">
+                                <div>
+                                    <div class="deck-label">Re-list rate</div>
+                                    <div class="mt-1 deck-num text-2xl"
+                                         :class="ownerSignals.relist_rate !== null && ownerSignals.relist_rate >= 0.25 ? 'text-floor-win' : 'text-deck-soft'">
+                                        {{ pct(ownerSignals.relist_rate) }}
+                                    </div>
+                                </div>
+                                <div>
+                                    <div class="deck-label">Multi-deal</div>
+                                    <div class="mt-1 deck-num text-2xl text-floor-win">
+                                        {{ ownerSignals.multi_deal_owners }}
+                                    </div>
+                                    <div class="text-[10px] font-mono text-deck-dim">/ {{ ownerSignals.total_owners_with_deals }}</div>
+                                </div>
+                                <div>
+                                    <div class="deck-label">Avg LTV</div>
+                                    <div class="mt-1 deck-num text-2xl">{{ fmtMoney(ownerSignals.avg_lifetime_fees) }}</div>
+                                </div>
+                            </div>
+
+                            <!-- Upsell opportunities -->
+                            <div v-if="ownerSignals.upsell_opportunities.length" class="border-t border-deck-line/50 pt-3">
+                                <div class="deck-label mb-2">Untapped inventory · upsell opportunity</div>
+                                <ul class="space-y-1 text-xs">
+                                    <li v-for="u in ownerSignals.upsell_opportunities" :key="u.owner_id"
+                                        class="flex items-center justify-between">
+                                        <Link :href="`/owners/${u.owner_id}`" class="text-deck-text hover:text-floor-accent">
+                                            {{ u.owner_name }}
+                                        </Link>
+                                        <span class="font-mono text-deck-soft">
+                                            {{ u.active_listings }} of {{ u.properties }} live
+                                            <span class="text-floor-accent">· {{ u.untapped }} untapped</span>
+                                        </span>
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </section>
 
             <!-- ──────────────────────────────────────────────────
