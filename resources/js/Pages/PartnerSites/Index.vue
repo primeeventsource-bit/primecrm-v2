@@ -204,6 +204,80 @@ async function archiveSite(s: Site): Promise<void> {
 /* ──────────────────────────────────────────────────────────────────────
  * COPY HELPERS
  * ──────────────────────────────────────────────────────────────────── */
+/* ──────────────────────────────────────────────────────────────────────
+ * WEBHOOK EVENT FEED — lazy-loaded per card.
+ *
+ * Each site card has an expandable "Recent activity" panel showing the
+ * latest ~25 inbound webhook attempts (successes, sig failures, dupes,
+ * validation rejects). We don't fetch on page load — only when the
+ * operator clicks Expand — so listing 20 partner sites doesn't fan out
+ * to 20 webhook-event queries.
+ * ──────────────────────────────────────────────────────────────────── */
+interface WebhookEvent {
+    id: string;
+    kind: 'inquiry' | 'booking';
+    http_status: number;
+    signature_valid: boolean;
+    external_inquiry_id: string | null;
+    external_booking_id: string | null;
+    related_id: string | null;
+    error_message: string | null;
+    request_ip: string | null;
+    user_agent: string | null;
+    payload_size_bytes: number;
+    created_at: string | null;
+}
+const expandedFeedFor = ref<string | null>(null);
+const feedEvents = ref<Record<string, WebhookEvent[]>>({});
+const feedLoading = ref<Record<string, boolean>>({});
+const feedError = ref<Record<string, string | null>>({});
+
+async function toggleFeed(s: Site): Promise<void> {
+    if (expandedFeedFor.value === s.id) {
+        expandedFeedFor.value = null;
+        return;
+    }
+    expandedFeedFor.value = s.id;
+    // Always re-fetch on expand so the operator sees fresh data after
+    // testing a webhook from the partner side (they'd otherwise have
+    // to reload the page to see their test).
+    feedLoading.value = { ...feedLoading.value, [s.id]: true };
+    feedError.value = { ...feedError.value, [s.id]: null };
+    try {
+        const { data } = await axios.get<{ data: WebhookEvent[] }>(
+            `/api/partner-sites/${s.id}/webhook-events`,
+            { params: { limit: 25 } },
+        );
+        feedEvents.value = { ...feedEvents.value, [s.id]: data.data };
+    } catch {
+        feedError.value = { ...feedError.value, [s.id]: 'Could not load events.' };
+    } finally {
+        feedLoading.value = { ...feedLoading.value, [s.id]: false };
+    }
+}
+
+function statusPillClass(e: WebhookEvent): string {
+    if (!e.signature_valid) return 'bg-floor-lose/15 text-floor-lose ring-floor-lose/30';
+    if (e.http_status >= 200 && e.http_status < 300) {
+        return e.http_status === 200
+            // 200 = duplicate (already had the row). Useful info, not an error.
+            ? 'bg-deck-muted text-deck-soft ring-deck-line'
+            : 'bg-floor-win/15 text-floor-win ring-floor-win/30';
+    }
+    if (e.http_status === 401) return 'bg-floor-lose/15 text-floor-lose ring-floor-lose/30';
+    if (e.http_status === 422) return 'bg-floor-accent/15 text-floor-accent ring-floor-accent/30';
+    return 'bg-deck-muted text-deck-soft ring-deck-line';
+}
+
+function statusLabel(e: WebhookEvent): string {
+    if (!e.signature_valid) return 'sig fail';
+    if (e.http_status === 201) return 'created';
+    if (e.http_status === 200) return 'duplicate';
+    if (e.http_status === 401) return 'unauthorized';
+    if (e.http_status === 422) return 'rejected';
+    return String(e.http_status);
+}
+
 /** Composite key: "<siteId>:<kind>" so each row's two buttons track copy state independently. */
 const copiedUrlKey = ref<string | null>(null);
 async function copyWebhookUrl(s: Site, kind: 'inquiry' | 'booking'): Promise<void> {
@@ -653,19 +727,95 @@ function fmtRelative(iso: string | null): string {
                                     {{ s.has_webhook_secret ? 'configured' : 'not set' }}
                                 </span>
                             </span>
-                            <button
-                                v-if="canManageSites"
-                                class="btn-ghost text-xs"
-                                :disabled="rotatingId === s.id"
-                                :title="s.has_webhook_secret
-                                    ? 'Rotate (invalidates the old secret immediately)'
-                                    : 'Mint a webhook secret'"
-                                @click="rotateSecret(s)"
+                            <div class="flex items-center gap-1">
+                                <button
+                                    class="btn-ghost text-xs"
+                                    :title="expandedFeedFor === s.id
+                                        ? 'Hide recent webhook activity'
+                                        : 'Show recent webhook activity'"
+                                    @click="toggleFeed(s)"
+                                >
+                                    {{ expandedFeedFor === s.id ? '▾ Hide activity' : '▸ View activity' }}
+                                </button>
+                                <button
+                                    v-if="canManageSites"
+                                    class="btn-ghost text-xs"
+                                    :disabled="rotatingId === s.id"
+                                    :title="s.has_webhook_secret
+                                        ? 'Rotate (invalidates the old secret immediately)'
+                                        : 'Mint a webhook secret'"
+                                    @click="rotateSecret(s)"
+                                >
+                                    {{ rotatingId === s.id
+                                        ? 'Rotating…'
+                                        : s.has_webhook_secret ? 'Rotate secret' : 'Mint secret' }}
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Activity feed — lazy-loaded on expand -->
+                        <div
+                            v-if="expandedFeedFor === s.id"
+                            class="mt-3 border-t border-deck-line pt-3"
+                        >
+                            <div v-if="feedLoading[s.id]" class="text-xs text-deck-dim">
+                                Loading activity…
+                            </div>
+                            <div v-else-if="feedError[s.id]" class="text-xs text-floor-lose">
+                                {{ feedError[s.id] }}
+                            </div>
+                            <div
+                                v-else-if="!feedEvents[s.id] || feedEvents[s.id].length === 0"
+                                class="text-xs text-deck-dim italic"
                             >
-                                {{ rotatingId === s.id
-                                    ? 'Rotating…'
-                                    : s.has_webhook_secret ? 'Rotate secret' : 'Mint secret' }}
-                            </button>
+                                No webhook activity yet. Once the partner posts to either
+                                URL, every attempt — successes, signature failures, validation
+                                rejects — shows up here.
+                            </div>
+                            <div v-else class="space-y-1.5 max-h-72 overflow-y-auto">
+                                <div
+                                    v-for="e in feedEvents[s.id]"
+                                    :key="e.id"
+                                    class="rounded-md border border-deck-line bg-deck-bg/50 px-2.5 py-2 text-[11px]"
+                                >
+                                    <div class="flex items-center gap-2 flex-wrap">
+                                        <span class="pill font-mono ring-1 ring-inset" :class="statusPillClass(e)">
+                                            {{ statusLabel(e) }}
+                                        </span>
+                                        <span class="pill font-mono bg-deck-muted text-deck-soft ring-1 ring-deck-line">
+                                            {{ e.kind }}
+                                        </span>
+                                        <span class="font-mono tabular-nums text-deck-dim">
+                                            HTTP {{ e.http_status }}
+                                        </span>
+                                        <span class="ml-auto font-mono tabular-nums text-deck-soft">
+                                            {{ fmtRelative(e.created_at) }}
+                                        </span>
+                                    </div>
+                                    <!-- External ids row — only shown when present -->
+                                    <div
+                                        v-if="e.external_inquiry_id || e.external_booking_id"
+                                        class="mt-1 flex items-center gap-3 font-mono text-[10px] text-deck-dim"
+                                    >
+                                        <span v-if="e.external_inquiry_id">
+                                            inquiry: <span class="text-deck-soft">{{ e.external_inquiry_id }}</span>
+                                        </span>
+                                        <span v-if="e.external_booking_id">
+                                            booking: <span class="text-deck-soft">{{ e.external_booking_id }}</span>
+                                        </span>
+                                    </div>
+                                    <!-- Error / context -->
+                                    <div
+                                        v-if="e.error_message"
+                                        class="mt-1 text-[11px] text-floor-lose break-words"
+                                    >{{ e.error_message }}</div>
+                                    <!-- Forensics row — IP + payload size, dim by default -->
+                                    <div class="mt-1 flex items-center gap-3 font-mono text-[10px] text-deck-dim">
+                                        <span v-if="e.request_ip">from <span class="text-deck-soft">{{ e.request_ip }}</span></span>
+                                        <span>{{ e.payload_size_bytes }} bytes</span>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
 

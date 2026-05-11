@@ -6,6 +6,7 @@ namespace App\Modules\Listing\Http\Controllers;
 
 use App\Core\Shared\TenantContext;
 use App\Modules\Listing\Domain\Models\PartnerSite;
+use App\Modules\Listing\Domain\Models\PartnerWebhookEvent;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
@@ -345,6 +346,58 @@ final class PartnerSiteController extends Controller
                 'inquiry_url' => url('/api/partner-webhooks/'.$site->slug.'/inquiries'),
                 'booking_url' => url('/api/partner-webhooks/'.$site->slug.'/bookings'),
             ],
+        ]);
+    }
+
+    /**
+     * Recent inbound webhook activity for one partner site.
+     *
+     *   GET /api/partner-sites/{id}/webhook-events?limit=25
+     *
+     * Returns the most recent events newest-first. Open to anyone in
+     * the tenant — the event payload doesn't contain secrets (we log
+     * the outcome, not the body) so we don't gate this behind the
+     * supervisor check the way create/destroy is.
+     */
+    public function webhookEvents(Request $request, string $id): JsonResponse
+    {
+        $request->validate([
+            'limit' => ['nullable', 'integer', 'min:1', 'max:200'],
+            'kind' => ['nullable', 'in:inquiry,booking'],
+        ]);
+
+        $site = PartnerSite::query()->find($id);
+        if ($site === null) {
+            return response()->json(['message' => 'Partner site not found'], 404);
+        }
+
+        $limit = (int) $request->integer('limit', 25);
+
+        $query = PartnerWebhookEvent::query()
+            ->where('partner_site_id', $site->id)
+            ->orderByDesc('created_at');
+
+        if ($request->filled('kind')) {
+            $query->where('kind', $request->string('kind')->value());
+        }
+
+        $events = $query->limit($limit)->get();
+
+        return response()->json([
+            'data' => $events->map(fn (PartnerWebhookEvent $e) => [
+                'id' => $e->id,
+                'kind' => $e->kind,
+                'http_status' => $e->http_status,
+                'signature_valid' => $e->signature_valid,
+                'external_inquiry_id' => $e->external_inquiry_id,
+                'external_booking_id' => $e->external_booking_id,
+                'related_id' => $e->related_id,
+                'error_message' => $e->error_message,
+                'request_ip' => $e->request_ip,
+                'user_agent' => $e->user_agent,
+                'payload_size_bytes' => $e->payload_size_bytes,
+                'created_at' => $e->created_at?->toIso8601String(),
+            ])->values(),
         ]);
     }
 

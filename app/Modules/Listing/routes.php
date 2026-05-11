@@ -68,6 +68,9 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
     Route::post('/partner-sites/{id}/rotate-secret', [PartnerSiteController::class, 'rotateSecret'])
         ->whereUuid('id')
         ->name('api.partner_sites.rotate_secret');
+    Route::get('/partner-sites/{id}/webhook-events', [PartnerSiteController::class, 'webhookEvents'])
+        ->whereUuid('id')
+        ->name('api.partner_sites.webhook_events');
 
     // Renter inquiry actions (D5).
     Route::prefix('/rental-inquiries/{id}')->whereUuid('id')->group(function (): void {

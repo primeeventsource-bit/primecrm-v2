@@ -7,6 +7,7 @@ namespace App\Modules\Listing\Http\Controllers;
 use App\Core\Shared\TenantContext;
 use App\Modules\Booking\Domain\Models\Booking;
 use App\Modules\Listing\Application\Services\BookingNotifier;
+use App\Modules\Listing\Application\Services\PartnerWebhookEventLogger;
 use App\Modules\Listing\Domain\Enums\ListingStatus;
 use App\Modules\Listing\Domain\Enums\RentalInquiryStatus;
 use App\Modules\Listing\Domain\Models\Listing;
@@ -20,6 +21,7 @@ use Illuminate\Routing\Controller;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 /**
  * PUBLIC partner webhook ingest. Partners (Airbnb, Vrbo, RedWeek, etc.)
@@ -62,6 +64,7 @@ final class PartnerWebhookController extends Controller
     public function __construct(
         private readonly TenantContext $tenants,
         private readonly BookingNotifier $notifier,
+        private readonly PartnerWebhookEventLogger $events,
     ) {}
 
     public function inquiry(Request $request, string $slug): JsonResponse
@@ -75,14 +78,28 @@ final class PartnerWebhookController extends Controller
             ->first();
 
         if ($site === null) {
+            // Can't log here — no partner_site_id to attribute the
+            // event to. Unknown slug is rare in practice (it'd mean
+            // the partner has a stale URL) and is logged via standard
+            // request logs.
             return response()->json(['message' => 'Unknown partner site.'], 404);
         }
 
         // 2. Verify HMAC. Refuse if the partner hasn't been issued a
         //    secret yet, OR the signature header is missing, OR doesn't
         //    match. All three collapse to a single 401 so the partner
-        //    can't probe which case they hit.
+        //    can't probe which case they hit. Logged either way so the
+        //    operator can see signature failures (the most common cause
+        //    of a silently-broken integration).
         if (! $this->verifySignature($request, $site)) {
+            $this->events->record(
+                request: $request,
+                site: $site,
+                kind: 'inquiry',
+                httpStatus: 401,
+                signatureValid: false,
+                errorMessage: 'HMAC signature mismatch or missing.',
+            );
             return response()->json(['message' => 'Invalid signature.'], 401);
         }
 
@@ -90,17 +107,30 @@ final class PartnerWebhookController extends Controller
         //    runs tenant-scoped without any client-supplied tenant id.
         $this->tenants->set($site->tenant_id);
 
-        $payload = $request->validate([
-            'external_inquiry_id' => ['required', 'string', 'max:128'],
-            'external_listing_id' => ['required', 'string', 'max:128'],
-            'renter_name' => ['required', 'string', 'max:200'],
-            'renter_email' => ['nullable', 'email', 'max:200'],
-            'renter_phone' => ['nullable', 'string', 'max:30'],
-            'requested_check_in' => ['nullable', 'date'],
-            'requested_check_out' => ['nullable', 'date', 'after_or_equal:requested_check_in'],
-            'offered_amount' => ['nullable', 'numeric', 'min:0'],
-            'message' => ['nullable', 'string', 'max:5000'],
-        ]);
+        try {
+            $payload = $request->validate([
+                'external_inquiry_id' => ['required', 'string', 'max:128'],
+                'external_listing_id' => ['required', 'string', 'max:128'],
+                'renter_name' => ['required', 'string', 'max:200'],
+                'renter_email' => ['nullable', 'email', 'max:200'],
+                'renter_phone' => ['nullable', 'string', 'max:30'],
+                'requested_check_in' => ['nullable', 'date'],
+                'requested_check_out' => ['nullable', 'date', 'after_or_equal:requested_check_in'],
+                'offered_amount' => ['nullable', 'numeric', 'min:0'],
+                'message' => ['nullable', 'string', 'max:5000'],
+            ]);
+        } catch (ValidationException $e) {
+            $this->events->record(
+                request: $request,
+                site: $site,
+                kind: 'inquiry',
+                httpStatus: 422,
+                signatureValid: true,
+                externalInquiryId: $request->input('external_inquiry_id'),
+                errorMessage: $this->flattenErrors($e),
+            );
+            throw $e;
+        }
 
         // 4. Resolve the listing via the partner_site_listings row that
         //    carries the partner's external_listing_id. If we don't
@@ -112,6 +142,15 @@ final class PartnerWebhookController extends Controller
             ->first();
 
         if ($psl === null) {
+            $this->events->record(
+                request: $request,
+                site: $site,
+                kind: 'inquiry',
+                httpStatus: 422,
+                signatureValid: true,
+                externalInquiryId: $payload['external_inquiry_id'],
+                errorMessage: 'Unknown external_listing_id: '.$payload['external_listing_id'],
+            );
             return response()->json([
                 'message' => 'Unknown external_listing_id for this partner site.',
             ], 422);
@@ -145,6 +184,17 @@ final class PartnerWebhookController extends Controller
                     ->where('external_inquiry_id', $payload['external_inquiry_id'])
                     ->first();
 
+                $this->events->record(
+                    request: $request,
+                    site: $site,
+                    kind: 'inquiry',
+                    httpStatus: 200,
+                    signatureValid: true,
+                    externalInquiryId: $payload['external_inquiry_id'],
+                    relatedId: $existing?->id,
+                    errorMessage: 'Duplicate — pre-existing inquiry returned.',
+                );
+
                 return response()->json([
                     'ok' => true,
                     'duplicate' => true,
@@ -158,6 +208,16 @@ final class PartnerWebhookController extends Controller
         //    the site's "last activity" so the UI can flag stale sites.
         $psl->increment('inquiry_count');
         $site->forceFill(['webhook_last_received_at' => Carbon::now()])->save();
+
+        $this->events->record(
+            request: $request,
+            site: $site,
+            kind: 'inquiry',
+            httpStatus: 201,
+            signatureValid: true,
+            externalInquiryId: $payload['external_inquiry_id'],
+            relatedId: $inquiry->id,
+        );
 
         return response()->json([
             'ok' => true,
@@ -205,31 +265,53 @@ final class PartnerWebhookController extends Controller
         }
 
         if (! $this->verifySignature($request, $site)) {
+            $this->events->record(
+                request: $request,
+                site: $site,
+                kind: 'booking',
+                httpStatus: 401,
+                signatureValid: false,
+                errorMessage: 'HMAC signature mismatch or missing.',
+            );
             return response()->json(['message' => 'Invalid signature.'], 401);
         }
 
         $this->tenants->set($site->tenant_id);
 
-        $payload = $request->validate([
-            'external_booking_id' => ['required', 'string', 'max:128'],
-            'external_inquiry_id' => ['nullable', 'string', 'max:128'],
-            // Required only when we can't resolve via an inquiry.
-            'external_listing_id' => ['nullable', 'string', 'max:128'],
-            'renter_name' => ['required', 'string', 'max:200'],
-            'renter_email' => ['nullable', 'email', 'max:200'],
-            'renter_phone' => ['nullable', 'string', 'max:30'],
-            'check_in_date' => ['required', 'date'],
-            'check_out_date' => ['required', 'date', 'after_or_equal:check_in_date'],
-            'total_price' => ['required', 'numeric', 'min:0'],
-            'currency' => ['nullable', 'string', 'size:3'],
-            // Owner payout is optional — if omitted we derive it from
-            // the listing's stored commission percentage.
-            'owner_payout' => ['nullable', 'numeric', 'min:0'],
-            'commission_pct' => ['nullable', 'numeric', 'min:0', 'max:100'],
-            'payment_status' => ['nullable', 'in:pending,deposit_paid,paid_in_full,refunded'],
-            // Free-form audit trail — partner fees, request id, etc.
-            'metadata' => ['nullable', 'array'],
-        ]);
+        try {
+            $payload = $request->validate([
+                'external_booking_id' => ['required', 'string', 'max:128'],
+                'external_inquiry_id' => ['nullable', 'string', 'max:128'],
+                // Required only when we can't resolve via an inquiry.
+                'external_listing_id' => ['nullable', 'string', 'max:128'],
+                'renter_name' => ['required', 'string', 'max:200'],
+                'renter_email' => ['nullable', 'email', 'max:200'],
+                'renter_phone' => ['nullable', 'string', 'max:30'],
+                'check_in_date' => ['required', 'date'],
+                'check_out_date' => ['required', 'date', 'after_or_equal:check_in_date'],
+                'total_price' => ['required', 'numeric', 'min:0'],
+                'currency' => ['nullable', 'string', 'size:3'],
+                // Owner payout is optional — if omitted we derive it from
+                // the listing's stored commission percentage.
+                'owner_payout' => ['nullable', 'numeric', 'min:0'],
+                'commission_pct' => ['nullable', 'numeric', 'min:0', 'max:100'],
+                'payment_status' => ['nullable', 'in:pending,deposit_paid,paid_in_full,refunded'],
+                // Free-form audit trail — partner fees, request id, etc.
+                'metadata' => ['nullable', 'array'],
+            ]);
+        } catch (ValidationException $e) {
+            $this->events->record(
+                request: $request,
+                site: $site,
+                kind: 'booking',
+                httpStatus: 422,
+                signatureValid: true,
+                externalInquiryId: $request->input('external_inquiry_id'),
+                externalBookingId: $request->input('external_booking_id'),
+                errorMessage: $this->flattenErrors($e),
+            );
+            throw $e;
+        }
 
         // ───── Idempotency check ─────
         $existing = Booking::query()
@@ -237,6 +319,17 @@ final class PartnerWebhookController extends Controller
             ->where('external_booking_id', $payload['external_booking_id'])
             ->first();
         if ($existing !== null) {
+            $this->events->record(
+                request: $request,
+                site: $site,
+                kind: 'booking',
+                httpStatus: 200,
+                signatureValid: true,
+                externalInquiryId: $payload['external_inquiry_id'] ?? null,
+                externalBookingId: $payload['external_booking_id'],
+                relatedId: $existing->id,
+                errorMessage: 'Duplicate — pre-existing booking returned.',
+            );
             return response()->json([
                 'ok' => true,
                 'duplicate' => true,
@@ -256,6 +349,16 @@ final class PartnerWebhookController extends Controller
                 ->where('external_inquiry_id', $payload['external_inquiry_id'])
                 ->first();
             if ($inquiry === null) {
+                $this->events->record(
+                    request: $request,
+                    site: $site,
+                    kind: 'booking',
+                    httpStatus: 422,
+                    signatureValid: true,
+                    externalInquiryId: $payload['external_inquiry_id'],
+                    externalBookingId: $payload['external_booking_id'],
+                    errorMessage: 'Unknown external_inquiry_id: '.$payload['external_inquiry_id'],
+                );
                 return response()->json([
                     'message' => 'Unknown external_inquiry_id for this partner site.',
                 ], 422);
@@ -271,18 +374,46 @@ final class PartnerWebhookController extends Controller
                 ->where('external_listing_id', $payload['external_listing_id'])
                 ->first();
             if ($psl === null) {
+                $this->events->record(
+                    request: $request,
+                    site: $site,
+                    kind: 'booking',
+                    httpStatus: 422,
+                    signatureValid: true,
+                    externalBookingId: $payload['external_booking_id'],
+                    errorMessage: 'Unknown external_listing_id: '.$payload['external_listing_id'],
+                );
                 return response()->json([
                     'message' => 'Unknown external_listing_id for this partner site.',
                 ], 422);
             }
             $listing = Listing::query()->find($psl->listing_id);
         } else {
+            $this->events->record(
+                request: $request,
+                site: $site,
+                kind: 'booking',
+                httpStatus: 422,
+                signatureValid: true,
+                externalBookingId: $payload['external_booking_id'],
+                errorMessage: 'Neither external_inquiry_id nor external_listing_id supplied.',
+            );
             return response()->json([
                 'message' => 'Either external_inquiry_id or external_listing_id is required.',
             ], 422);
         }
 
         if ($listing === null) {
+            $this->events->record(
+                request: $request,
+                site: $site,
+                kind: 'booking',
+                httpStatus: 422,
+                signatureValid: true,
+                externalInquiryId: $payload['external_inquiry_id'] ?? null,
+                externalBookingId: $payload['external_booking_id'],
+                errorMessage: 'Listing referenced by external id no longer exists.',
+            );
             return response()->json(['message' => 'Listing not found.'], 422);
         }
 
@@ -380,6 +511,18 @@ final class PartnerWebhookController extends Controller
                     ->where('external_booking_id', $payload['external_booking_id'])
                     ->first();
 
+                $this->events->record(
+                    request: $request,
+                    site: $site,
+                    kind: 'booking',
+                    httpStatus: 200,
+                    signatureValid: true,
+                    externalInquiryId: $payload['external_inquiry_id'] ?? null,
+                    externalBookingId: $payload['external_booking_id'],
+                    relatedId: $existing?->id,
+                    errorMessage: 'Race-condition duplicate caught by unique index.',
+                );
+
                 return response()->json([
                     'ok' => true,
                     'duplicate' => true,
@@ -401,6 +544,17 @@ final class PartnerWebhookController extends Controller
             // empty if it failed; operator can re-trigger manually.
         }
 
+        $this->events->record(
+            request: $request,
+            site: $site,
+            kind: 'booking',
+            httpStatus: 201,
+            signatureValid: true,
+            externalInquiryId: $payload['external_inquiry_id'] ?? null,
+            externalBookingId: $payload['external_booking_id'],
+            relatedId: $booking->id,
+        );
+
         return response()->json([
             'ok' => true,
             'duplicate' => false,
@@ -409,6 +563,21 @@ final class PartnerWebhookController extends Controller
             'owner_payout' => (float) $booking->owner_payout,
             'our_commission' => (float) $booking->our_commission,
         ], 201);
+    }
+
+    /**
+     * Flatten Laravel's per-field validation error array into a single
+     * line for the event log. "field_a: msg1; field_b: msg2".
+     */
+    private function flattenErrors(ValidationException $e): string
+    {
+        $parts = [];
+        foreach ($e->errors() as $field => $msgs) {
+            foreach ((array) $msgs as $msg) {
+                $parts[] = "{$field}: {$msg}";
+            }
+        }
+        return implode('; ', $parts);
     }
 
     /**
