@@ -4,9 +4,12 @@ declare(strict_types=1);
 
 use App\Modules\Commission\Http\Controllers\AdjustmentController;
 use App\Modules\Commission\Http\Controllers\PayoutController;
+use App\Modules\Commission\Http\Controllers\PlanController;
 use Illuminate\Support\Facades\Route;
 
 Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
+    Route::get('commission/plans', [PlanController::class, 'index']);
+
     Route::prefix('commission/payouts')->group(function (): void {
         Route::get('/', [PayoutController::class, 'index']);
         Route::post('/build', [PayoutController::class, 'build']);

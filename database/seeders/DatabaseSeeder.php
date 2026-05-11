@@ -19,5 +19,9 @@ final class DatabaseSeeder extends Seeder
     {
         // Always-on seed data (federal calling-window default).
         $this->call(BaseCallingWindowsSeeder::class);
+
+        // Default commission plans for every existing tenant. Idempotent;
+        // safe to re-run after schema or rate changes.
+        $this->call(CommissionPlansSeeder::class);
     }
 }

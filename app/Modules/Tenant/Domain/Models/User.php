@@ -36,6 +36,10 @@ final class User extends Authenticatable implements MustVerifyEmail
         'timezone',
         'skills',
         'is_panama_based',
+        'pay_type',
+        'base_rate_cents',
+        'pay_currency',
+        'pay_notes',
     ];
 
     protected $hidden = [
@@ -52,6 +56,7 @@ final class User extends Authenticatable implements MustVerifyEmail
             'role' => UserRole::class,
             'skills' => 'array',
             'is_panama_based' => 'boolean',
+            'base_rate_cents' => 'integer',
         ];
     }
 

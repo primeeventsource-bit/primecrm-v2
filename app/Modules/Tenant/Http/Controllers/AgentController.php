@@ -5,11 +5,13 @@ declare(strict_types=1);
 namespace App\Modules\Tenant\Http\Controllers;
 
 use App\Core\Shared\Services\AuditLogService;
+use App\Modules\Commission\Domain\Models\CommissionAssignment;
 use App\Modules\Tenant\Domain\Models\User;
 use App\Support\Enums\UserRole;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\Rule;
 
@@ -85,21 +87,68 @@ final class AgentController extends Controller
             'timezone' => ['nullable', 'string', 'max:64'],
             'skills' => ['nullable', 'array'],
             'is_panama_based' => ['nullable', 'boolean'],
+
+            // Compensation package
+            'pay_type' => ['nullable', Rule::in(['hourly', 'salary', 'commission_only', 'hybrid'])],
+            // Dollars (decimal); converted to cents for storage. Form sends e.g. 18.50 or 65000.
+            'base_rate' => ['nullable', 'numeric', 'min:0', 'max:10000000'],
+            'pay_currency' => ['nullable', 'string', 'size:3'],
+            'pay_notes' => ['nullable', 'string', 'max:500'],
+
+            // Commission assignment (optional — plan may be set later)
+            'commission_plan_id' => ['nullable', 'uuid', 'exists:commission_plans,id'],
+            // Per-user rate override, percent (e.g. 12 means 12%). Stored in
+            // CommissionAssignment.overrides as {"rate_pct": <n>} — the engine
+            // already honours this shape.
+            'commission_override_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
         ]);
 
-        $user = User::query()->create([
-            'first_name' => $validated['first_name'],
-            'last_name' => $validated['last_name'],
-            'email' => mb_strtolower($validated['email']),
-            'password' => Hash::make($validated['password']),
-            'role' => $validated['role'],
-            'status' => 'active',
-            'phone' => $validated['phone'] ?? null,
-            'extension' => $validated['extension'] ?? null,
-            'timezone' => $validated['timezone'] ?? 'America/New_York',
-            'skills' => $validated['skills'] ?? [],
-            'is_panama_based' => (bool) ($validated['is_panama_based'] ?? false),
-        ]);
+        $payType = $validated['pay_type'] ?? 'commission_only';
+        $baseRateCents = isset($validated['base_rate'])
+            ? (int) round(((float) $validated['base_rate']) * 100)
+            : null;
+        // Commission-only never carries a base rate; clear it to avoid stale numbers.
+        if ($payType === 'commission_only') {
+            $baseRateCents = null;
+        }
+
+        $user = DB::transaction(function () use ($validated, $request, $payType, $baseRateCents): User {
+            $u = User::query()->create([
+                'first_name' => $validated['first_name'],
+                'last_name' => $validated['last_name'],
+                'email' => mb_strtolower($validated['email']),
+                'password' => Hash::make($validated['password']),
+                'role' => $validated['role'],
+                'status' => 'active',
+                'phone' => $validated['phone'] ?? null,
+                'extension' => $validated['extension'] ?? null,
+                'timezone' => $validated['timezone'] ?? 'America/New_York',
+                'skills' => $validated['skills'] ?? [],
+                'is_panama_based' => (bool) ($validated['is_panama_based'] ?? false),
+                'pay_type' => $payType,
+                'base_rate_cents' => $baseRateCents,
+                'pay_currency' => $validated['pay_currency'] ?? 'USD',
+                'pay_notes' => $validated['pay_notes'] ?? null,
+            ]);
+
+            if (! empty($validated['commission_plan_id'])) {
+                $overrides = [];
+                if (isset($validated['commission_override_rate'])) {
+                    $overrides['rate_pct'] = (float) $validated['commission_override_rate'];
+                }
+
+                CommissionAssignment::query()->create([
+                    'tenant_id' => $u->tenant_id,
+                    'user_id' => $u->id,
+                    'commission_plan_id' => $validated['commission_plan_id'],
+                    'effective_from' => now()->toDateString(),
+                    'effective_to' => null,
+                    'overrides' => $overrides ?: null,
+                ]);
+            }
+
+            return $u;
+        });
 
         $this->audit->record(
             action: 'agent.created',
@@ -107,11 +156,15 @@ final class AgentController extends Controller
             entityId: $user->id,
             context: [
                 'role' => $user->role->value,
+                'pay_type' => $user->pay_type,
+                'base_rate_cents' => $user->base_rate_cents,
+                'commission_plan_id' => $validated['commission_plan_id'] ?? null,
+                'commission_override_rate' => $validated['commission_override_rate'] ?? null,
                 'created_by' => $request->user()->id,
             ],
         );
 
-        return response()->json($this->serialize($user), 201);
+        return response()->json($this->serialize($user->fresh()), 201);
     }
 
     public function show(string $id): JsonResponse
@@ -154,6 +207,14 @@ final class AgentController extends Controller
 
     private function serialize(User $u): array
     {
+        $today = now()->toDateString();
+        $assignment = CommissionAssignment::query()
+            ->forUser($u->id)
+            ->activeOn($today)
+            ->with('plan:id,name')
+            ->orderByDesc('effective_from')
+            ->first();
+
         return [
             'id' => $u->id,
             'first_name' => $u->first_name,
@@ -166,6 +227,16 @@ final class AgentController extends Controller
             'timezone' => $u->timezone,
             'skills' => $u->skills ?? [],
             'is_panama_based' => (bool) $u->is_panama_based,
+            'pay_type' => $u->pay_type,
+            'base_rate_cents' => $u->base_rate_cents,
+            'pay_currency' => $u->pay_currency,
+            'pay_notes' => $u->pay_notes,
+            'commission' => $assignment ? [
+                'plan_id' => $assignment->commission_plan_id,
+                'plan_name' => $assignment->plan?->name,
+                'effective_from' => $assignment->effective_from?->toDateString(),
+                'override_rate_pct' => $assignment->overrides['rate_pct'] ?? null,
+            ] : null,
             'created_at' => $u->created_at?->toIso8601String(),
         ];
     }
