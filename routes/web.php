@@ -17,6 +17,13 @@ Route::get('/', fn () => redirect('/dashboard'));
 
 Route::get('/login', [InertiaPageController::class, 'login'])->name('login');
 
+// Prime Connect — public guest entry. NO auth, NO tenant middleware.
+// The page itself validates the token via /api/prime-connect/guest/{token};
+// invalid tokens render an "expired link" state rather than 404.
+Route::get('/prime-connect/join/{token}', [InertiaPageController::class, 'primeConnectGuest'])
+    ->where('token', '[a-f0-9]{32}')
+    ->name('prime_connect.guest');
+
 Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
     Route::get('/dashboard', [InertiaPageController::class, 'dashboard'])->name('dashboard');
     Route::get('/dialer/console', [InertiaPageController::class, 'dialerConsole'])->name('dialer.console');

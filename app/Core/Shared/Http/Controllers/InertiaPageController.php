@@ -167,4 +167,14 @@ final class InertiaPageController extends Controller
         // visible at all times.
         return Inertia::render('PrimeConnect/Index');
     }
+
+    public function primeConnectGuest(string $token): Response
+    {
+        // Customer-facing guest entry point — public, no auth, no
+        // AppLayout. The page fetches /api/prime-connect/guest/{token}
+        // to validate the token + load the minimal room info; if the
+        // token is invalid the page renders an "Expired link" state
+        // rather than 404ing here, which is friendlier to the customer.
+        return Inertia::render('PrimeConnect/Guest', ['token' => $token]);
+    }
 }

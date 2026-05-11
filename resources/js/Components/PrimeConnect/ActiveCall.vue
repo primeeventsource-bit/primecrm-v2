@@ -268,6 +268,49 @@ async function copyInvite(): Promise<void> {
 }
 
 /* ──────────────────────────────────────────────────────────────────────
+ * Guest invite — mints a public URL that a customer can open WITHOUT a
+ * CRM account. Different surface from the agent invite above:
+ *
+ *   • POST /api/prime-connect/rooms/{id}/guest-tokens — backend mints
+ *     a short-lived single-use-ish token, returns the full join URL.
+ *   • The URL routes to /prime-connect/join/{token} (public Inertia
+ *     page Guest.vue). The customer joins the same Twilio room via the
+ *     public access-token endpoint, identifying as "guest:{tokenId}".
+ *
+ * Disabled when we don't have a roomId (invitee path — only the room
+ * owner can hand out customer invites for the room they created).
+ * ──────────────────────────────────────────────────────────────────── */
+const guestLinkCopied = ref(false);
+const guestLinkBusy = ref(false);
+const canMintGuestLink = computed(() => !!props.roomId && props.roomId !== '');
+let guestResetTimer: number | undefined;
+async function copyGuestInvite(): Promise<void> {
+    if (!canMintGuestLink.value || guestLinkBusy.value) return;
+    guestLinkBusy.value = true;
+    try {
+        const { data } = await axios.post<{ join_url: string }>(
+            `/api/prime-connect/rooms/${props.roomId}/guest-tokens`,
+            { display_name: props.intent?.leadName ?? null },
+        );
+        try {
+            await navigator.clipboard.writeText(data.join_url);
+            guestLinkCopied.value = true;
+            if (guestResetTimer !== undefined) window.clearTimeout(guestResetTimer);
+            guestResetTimer = window.setTimeout(() => (guestLinkCopied.value = false), 2200);
+        } catch {
+            // Fallback for clipboard-blocked contexts — show the URL so
+            // the agent can copy it manually.
+            window.prompt('Copy this customer invite link:', data.join_url);
+        }
+    } catch {
+        // No-op — server rejection surfaces via the call's lastError
+        // banner in Index.vue; the button just doesn't show "Copied".
+    } finally {
+        guestLinkBusy.value = false;
+    }
+}
+
+/* ──────────────────────────────────────────────────────────────────────
  * Participant count — local participant + every connected remote.
  * Drives a small badge on the main canvas so you can see at a glance
  * that someone else has joined (without staring at the dominant-
@@ -544,21 +587,41 @@ const customerLabel = computed(() => props.intent?.leadName ?? 'Connecting…');
                 <span class="ml-1 text-white/60">in room</span>
             </div>
 
-            <!-- Invite link button — bottom-right of the main feed.
-                 Solo-call affordance: the inviter clicks once, gets
-                 ?join=… in their clipboard, opens it elsewhere. -->
-            <button
-                v-if="inviteLink"
-                type="button"
-                class="absolute bottom-24 right-4 inline-flex items-center gap-2 rounded-md bg-black/55 px-3 py-2 text-xs ring-1 ring-white/10 transition-colors hover:bg-black/70"
-                :title="inviteLink"
-                @click="copyInvite"
-            >
-                <WarRoomIcon name="broadcast" class="h-3.5 w-3.5" />
-                <span class="font-mono uppercase tracking-wider">
-                    {{ inviteCopied ? 'Copied ✓' : 'Copy invite link' }}
-                </span>
-            </button>
+            <!-- Invite links — bottom-right of the main feed. Two
+                 surfaces: AGENT invite (auth-gated; for pulling in a
+                 supervisor or co-closer) and CUSTOMER invite (public
+                 token; for inviting a lead who isn't in the CRM). -->
+            <div class="absolute bottom-24 right-4 flex flex-col items-end gap-1.5">
+                <button
+                    v-if="inviteLink"
+                    type="button"
+                    class="inline-flex items-center gap-2 rounded-md bg-black/55 px-3 py-2 text-xs ring-1 ring-white/10 transition-colors hover:bg-black/70"
+                    :title="inviteLink"
+                    @click="copyInvite"
+                >
+                    <WarRoomIcon name="broadcast" class="h-3.5 w-3.5" />
+                    <span class="font-mono uppercase tracking-wider">
+                        {{ inviteCopied ? 'Copied ✓' : 'Agent invite link' }}
+                    </span>
+                </button>
+                <button
+                    v-if="canMintGuestLink"
+                    type="button"
+                    class="inline-flex items-center gap-2 rounded-md bg-floor-accent/20 px-3 py-2 text-xs ring-1 ring-floor-accent/40 transition-colors hover:bg-floor-accent/30 disabled:cursor-not-allowed disabled:opacity-50"
+                    :disabled="guestLinkBusy"
+                    title="Mint a public link to send the customer"
+                    @click="copyGuestInvite"
+                >
+                    <WarRoomIcon name="phone" class="h-3.5 w-3.5" />
+                    <span class="font-mono uppercase tracking-wider">
+                        {{ guestLinkBusy
+                            ? 'Minting…'
+                            : guestLinkCopied
+                                ? 'Customer link copied ✓'
+                                : 'Customer invite link' }}
+                    </span>
+                </button>
+            </div>
         </section>
 
         <!-- ════════════════════════════════════════════════════════════

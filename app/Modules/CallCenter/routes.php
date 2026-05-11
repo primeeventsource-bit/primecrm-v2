@@ -5,6 +5,8 @@ declare(strict_types=1);
 use App\Modules\CallCenter\Http\Controllers\AgentStatusController;
 use App\Modules\CallCenter\Http\Controllers\CallController;
 use App\Modules\CallCenter\Http\Controllers\PrimeConnectAccessTokenController;
+use App\Modules\CallCenter\Http\Controllers\PrimeConnectGuestController;
+use App\Modules\CallCenter\Http\Controllers\PrimeConnectGuestTokenController;
 use App\Modules\CallCenter\Http\Controllers\PrimeConnectRoomController;
 use App\Modules\CallCenter\Http\Controllers\SupervisorCallController;
 use App\Modules\CallCenter\Http\Controllers\TwilioWebhookController;
@@ -56,8 +58,23 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
             // signal supervisors that they want backup; supervisors can
             // also unflip from the war room view.
             Route::post('/{id}/flag', [PrimeConnectRoomController::class, 'flag']);
+            // Customer-facing guest invite tokens. Staff mints / revokes;
+            // public consumption lives outside this auth group.
+            Route::post('/{id}/guest-tokens', [PrimeConnectGuestTokenController::class, 'store']);
+            Route::delete('/{id}/guest-tokens/{tokenId}', [PrimeConnectGuestTokenController::class, 'destroy']);
         });
     });
+});
+
+/*
+ * Prime Connect — PUBLIC guest endpoints. Bearer is the token itself
+ * (it's in the URL); GuestTokenService::resolve gates access by token
+ * lookup + expiry + revocation check, then sets TenantContext from the
+ * row before any subsequent query runs.
+ */
+Route::prefix('prime-connect/guest')->group(function (): void {
+    Route::get('/{token}', [PrimeConnectGuestController::class, 'show']);
+    Route::post('/{token}/access-token', [PrimeConnectGuestController::class, 'accessToken']);
 });
 
 /*

@@ -79,6 +79,13 @@ export interface ConnectOptions {
      */
     startMuted?: boolean;
     startCameraOff?: boolean;
+    /**
+     * Custom JWT fetcher. When omitted the bridge POSTs to the standard
+     * /api/prime-connect/access-token (Sanctum-authed). The customer
+     * guest flow plugs a fetcher that hits the public guest endpoint
+     * instead — same bridge, different credential gate.
+     */
+    fetchAccessToken?: () => Promise<{ token: string; identity: string }>;
 }
 
 export interface RemoteParticipantState {
@@ -164,15 +171,23 @@ export function useTwilioBridge() {
         lastError.value = null;
 
         try {
-            // 1. Mint a Twilio JWT scoped to this room+role.
+            // 1. Mint a Twilio JWT scoped to this room+role. Default
+            //    path POSTs the auth-gated access-token endpoint; the
+            //    guest flow injects its own fetcher (public endpoint
+            //    keyed off the URL token).
             state.value = 'fetching-token';
-            const { data } = await axios.post<AccessTokenResponse>(
-                '/api/prime-connect/access-token',
-                {
-                    role: opts.role,
-                    room_name: opts.roomName,
-                },
-            );
+            const data: AccessTokenResponse = opts.fetchAccessToken
+                ? await (async () => {
+                    const r = await opts.fetchAccessToken!();
+                    return { token: r.token, identity: r.identity, expires_at: '' };
+                })()
+                : (await axios.post<AccessTokenResponse>(
+                    '/api/prime-connect/access-token',
+                    {
+                        role: opts.role,
+                        room_name: opts.roomName,
+                    },
+                )).data;
 
             // 2. Acquire local media. Dynamic-import the SDK so the
             //    main app bundle doesn't pay the cost of twilio-video's
