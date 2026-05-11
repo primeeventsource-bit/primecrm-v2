@@ -7,6 +7,7 @@ use App\Modules\Compliance\Http\Controllers\ComplianceRecordingController;
 use App\Modules\Compliance\Http\Controllers\ConsentController;
 use App\Modules\Compliance\Http\Controllers\DncController;
 use App\Modules\Compliance\Http\Controllers\GuardrailController;
+use App\Modules\Compliance\Http\Controllers\LiveCoachController;
 use App\Modules\Compliance\Http\Controllers\ProhibitedPhraseController;
 use App\Modules\Compliance\Http\Controllers\RefundCaseController;
 use Illuminate\Support\Facades\Route;
@@ -56,5 +57,16 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
         // for any free-form text shown to or composed for owners.
         Route::post('/phrase-check', [ProhibitedPhraseController::class, 'check'])
             ->name('api.compliance.phrase_check');
+    });
+
+    // AI Live Coach (D8) — under /api/coach to keep it discoverable
+    // for agents on the dialer screen, even though it's served by
+    // the Compliance module (the priority hierarchy is compliance-
+    // first per §6 of the spec).
+    Route::prefix('coach')->group(function (): void {
+        Route::post('/suggestion', [LiveCoachController::class, 'suggestion'])
+            ->name('api.coach.suggestion');
+        Route::get('/system-prompt', [LiveCoachController::class, 'systemPrompt'])
+            ->name('api.coach.system_prompt');
     });
 });
