@@ -61,6 +61,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import WarRoomIcon from '@/Components/Supervisor/WarRoomIcon.vue';
 import { useCallTimer } from '@/Composables/useCallTimer';
+import type { useTwilioBridge } from '@/Composables/useTwilioBridge';
 
 interface CallIntent {
     leadId: string | null;
@@ -68,9 +69,19 @@ interface CallIntent {
     scheduledCallId: string | null;
 }
 
+type Bridge = ReturnType<typeof useTwilioBridge>;
+
 const props = defineProps<{
     intent: CallIntent | null;
+    /** ISO timestamp the local participant entered the room; null until connect resolves. */
+    answeredAt: string | null;
     twilioState: 'connected' | 'degraded' | 'offline';
+    /**
+     * The Twilio bridge instance owned by Pages/PrimeConnect/Index.vue.
+     * We attach this view's <video>/<audio> elements to the bridge's
+     * local + remote tracks reactively.
+     */
+    bridge: Bridge;
 }>();
 
 const emit = defineEmits<{
@@ -78,21 +89,12 @@ const emit = defineEmits<{
 }>();
 
 /* ──────────────────────────────────────────────────────────────────────
- * Call timer.
- *
- * Wired to the existing useCallTimer composable: it watches an
- * `answered_at` ISO ref, ticks once per second while it's set, and
- * stops cleanly on unmount or clear. When useActiveCall is plugged in
- * for real Twilio data, swap `answeredAt` for the composable's
- * `call.value.answered_at` and the rest of this view's bindings keep
- * working unchanged.
- *
- * useCallTimer formats as MM:SS — fine for typical sales calls. For
- * the rare hour-plus call we override with a local h:mm:ss formatter
- * driven off elapsedSeconds rather than display.
+ * Call timer — driven by the prop now (provided by usePrimeConnectCall
+ * once Video.connect() resolves). Until the room connects, the timer
+ * stays paused at 00:00.
  * ──────────────────────────────────────────────────────────────────── */
-const answeredAt = ref<string | null>(new Date().toISOString());
-const { elapsedSeconds } = useCallTimer(answeredAt);
+const answeredAtRef = computed(() => props.answeredAt);
+const { elapsedSeconds } = useCallTimer(answeredAtRef);
 
 const elapsedLabel = computed(() => {
     const s = elapsedSeconds.value;
@@ -104,42 +106,120 @@ const elapsedLabel = computed(() => {
 });
 
 /* ──────────────────────────────────────────────────────────────────────
- * Self-view. Same getUserMedia approach as the lobby's device check —
- * once Twilio is wired this stream will come from
- * room.localParticipant instead, but the <video> element stays.
+ * Track attachment — bridge ↔ DOM <video> / <audio> elements.
+ *
+ * The Twilio Video SDK exposes attach()/detach() on every track. We
+ * call them in watchers so that:
+ *   • The local video track lights up the self-view as soon as it's
+ *     available (which is before the room connects — createLocalTracks
+ *     resolves first).
+ *   • The first remote participant's video track lights up the main
+ *     canvas as soon as their `trackSubscribed` event fires.
+ *   • Audio tracks attach to hidden <audio> elements so they play
+ *     even when the participant isn't visible in the main canvas
+ *     (a future supervisor-listen mode rides on this).
+ *
+ * Cleanup: track.detach() returns the elements it was attached to.
+ * Removing them from the DOM is the only way the camera-on indicator
+ * goes dark; the bridge's stop() handles the underlying MediaStream.
  * ──────────────────────────────────────────────────────────────────── */
-const selfVideo = ref<HTMLVideoElement | null>(null);
-let selfStream: MediaStream | null = null;
-async function startSelfPreview(): Promise<void> {
-    try {
-        selfStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        if (selfVideo.value) {
-            selfVideo.value.srcObject = selfStream;
-            await selfVideo.value.play().catch(() => { /* autoplay blocked is OK */ });
+const selfVideoEl = ref<HTMLVideoElement | null>(null);
+const remoteVideoEl = ref<HTMLVideoElement | null>(null);
+const remoteAudioMount = ref<HTMLDivElement | null>(null);
+
+// Local video → self-view <video>. Detaches the prior track first so a
+// reconnect doesn't double-attach.
+watch(
+    () => props.bridge.localVideoTrack.value,
+    (track, prev) => {
+        if (prev) {
+            try { prev.detach().forEach((el) => el.remove()); } catch { /* */ }
         }
-    } catch { /* permission denied — placeholder block stays visible */ }
-}
-function stopSelfPreview(): void {
-    selfStream?.getTracks().forEach(t => t.stop());
-    selfStream = null;
-}
-onMounted(startSelfPreview);
-onBeforeUnmount(stopSelfPreview);
+        if (track && selfVideoEl.value) {
+            try { track.attach(selfVideoEl.value); } catch { /* */ }
+        }
+    },
+    { immediate: true },
+);
+
+// First remote participant's video → main canvas. We pick the
+// dominant speaker when available (the SDK calls this on talk), else
+// the first remote in the map. The watcher is a single source of
+// truth — adding/removing participants reactively flips the main feed.
+const primaryRemote = computed(() => {
+    const map = props.bridge.remoteParticipants.value;
+    const dominant = props.bridge.dominantSpeakerIdentity.value;
+    if (dominant && map.has(dominant)) return map.get(dominant)!;
+    const first = map.values().next();
+    return first.done ? null : first.value;
+});
+
+watch(
+    () => primaryRemote.value?.videoTrack ?? null,
+    (track, prev) => {
+        if (prev) {
+            try { prev.detach().forEach((el) => el.remove()); } catch { /* */ }
+        }
+        if (track && remoteVideoEl.value) {
+            try { track.attach(remoteVideoEl.value); } catch { /* */ }
+        }
+    },
+);
+
+// Remote audio — attach every remote audio track to a hidden mount
+// point so all participants are heard regardless of which is showing
+// on the main canvas. Re-runs on map changes; we rebuild from scratch
+// for simplicity (the set is small, ≤ ~6 participants typical).
+watch(
+    () => props.bridge.remoteParticipants.value,
+    (map) => {
+        const mount = remoteAudioMount.value;
+        if (!mount) return;
+        mount.innerHTML = '';
+        map.forEach((p) => {
+            if (p.audioTrack) {
+                try {
+                    const el = p.audioTrack.attach() as HTMLAudioElement;
+                    el.autoplay = true;
+                    mount.appendChild(el);
+                } catch { /* */ }
+            }
+        });
+    },
+    { deep: false },
+);
+
+// Cleanup on unmount — detach everything we attached. The bridge's
+// disconnect() is the source of truth for stopping the MediaStreams;
+// here we just unhook the DOM elements.
+onBeforeUnmount(() => {
+    const lv = props.bridge.localVideoTrack.value;
+    if (lv) {
+        try { lv.detach().forEach((el) => el.remove()); } catch { /* */ }
+    }
+    const r = primaryRemote.value?.videoTrack;
+    if (r) {
+        try { r.detach().forEach((el) => el.remove()); } catch { /* */ }
+    }
+    if (remoteAudioMount.value) remoteAudioMount.value.innerHTML = '';
+});
 
 /* ──────────────────────────────────────────────────────────────────────
- * Hardware toggles. Placeholder state — final implementation flips
- * room.localParticipant.audioTracks[0].disable() / enable().
+ * Hardware toggles — flip Twilio's local-track enabled state via the
+ * bridge. The bridge mirrors the new state back into isAudioMuted /
+ * isVideoOff so the UI binds to one source of truth.
+ *
+ * `sharing` (screen share) is reserved for a future getDisplayMedia
+ * pass — the LocalVideoTrack is published with addTrack/removeTrack
+ * on room.localParticipant rather than disable/enable.
  * ──────────────────────────────────────────────────────────────────── */
-const muted    = ref(false);
-const cameraOn = ref(true);
-const sharing  = ref(false);
+const muted = computed(() => props.bridge.isAudioMuted.value);
+const cameraOn = computed(() => !props.bridge.isVideoOff.value);
+const sharing = ref(false);
 
-watch(muted, (m) => {
-    selfStream?.getAudioTracks().forEach(t => { t.enabled = !m; });
-});
-watch(cameraOn, (on) => {
-    selfStream?.getVideoTracks().forEach(t => { t.enabled = on; });
-});
+function onToggleMute(): void { props.bridge.toggleAudio(); }
+function onToggleCamera(): void { props.bridge.toggleVideo(); }
+function onToggleShare(): void { sharing.value = !sharing.value; /* TODO: getDisplayMedia */ }
 
 /* ──────────────────────────────────────────────────────────────────────
  * Side drawers. Notes + pipeline + AI assist all open in the same
@@ -161,16 +241,29 @@ function toggleDrawer(d: Exclude<Drawer, null>): void {
 const warRoomMode = ref(false);
 
 /* ──────────────────────────────────────────────────────────────────────
- * Connection quality. Same idea as the lobby pill but richer — codec
- * + ping. Placeholder values until twilio-video's NetworkQualityLevel
- * is bound.
+ * Connection quality — derived from Twilio's NetworkQualityLevel
+ * (0..5; 0 = call dropping, 5 = perfect). We don't have actual RTT
+ * from the SDK without enabling the verbose stats API, so the
+ * "ms" label is a coarse mapping from the level for now. When we
+ * subscribe to LocalParticipant.NetworkQualityStats (verbosity 3),
+ * the real RTT replaces this mapping.
  * ──────────────────────────────────────────────────────────────────── */
 const codec = ref('HD');
-const rttMs = ref(24);
+const networkLevel = computed(() => props.bridge.networkQualityLevel.value);
+const rttMs = computed(() => {
+    // Approximate RTT bands from NetworkQualityLevel. These are the
+    // mappings Twilio's own docs use for the "Good / Acceptable /
+    // Poor" buckets; substitute real stats when verbosity=3 lands.
+    const l = networkLevel.value;
+    if (l === null) return 24;
+    return [400, 280, 180, 90, 45, 20][l] ?? 24;
+});
 const qualityClass = computed(() => {
     if (props.twilioState === 'offline')  return 'bg-rose-500/15 text-rose-300 ring-rose-500/30';
     if (props.twilioState === 'degraded') return 'bg-amber-500/15 text-amber-300 ring-amber-500/30';
-    if (rttMs.value >= 150)               return 'bg-amber-500/15 text-amber-300 ring-amber-500/30';
+    const l = networkLevel.value;
+    if (l !== null && l <= 1)             return 'bg-rose-500/15 text-rose-300 ring-rose-500/30';
+    if (l !== null && l <= 2)             return 'bg-amber-500/15 text-amber-300 ring-amber-500/30';
     return 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30';
 });
 
@@ -257,15 +350,9 @@ function promptIcon(k: CoachKind): 'flame' | 'alert' | 'broadcast' {
 function endCall(): void {
     // Past 30s the call is "real enough" that an accidental click should be
     // confirmed; in the first 30s a misclick on Start shouldn't punish the
-    // user with a dialog.
-    //
-    // Wire-up note: when useActiveCall is connected, replace `emit('end')`
-    // with `await activeCall.endCall()` so the backend POST /api/calls/{id}/end
-    // happens before this view tears down. The endCall composable returns
-    // the canonical Call record we then store as the just-ended row.
+    // user with a dialog. The bridge.disconnect() that follows (handled by
+    // the parent via usePrimeConnectCall.end()) releases the camera + mic.
     if (elapsedSeconds.value > 30 && !window.confirm('End the call now?')) return;
-    answeredAt.value = null; // stops the timer
-    stopSelfPreview();
     emit('end');
 }
 
@@ -278,16 +365,25 @@ const customerLabel = computed(() => props.intent?.leadName ?? 'Connecting…');
              LEFT — customer (main) feed + overlays
              ════════════════════════════════════════════════════════════ -->
         <section class="relative flex-1">
-            <!--
-              Customer placeholder feed. In production this is a <video>
-              with srcObject = remoteParticipant.videoTracks[0]. Until
-              then we render an animated gradient backdrop with the
-              customer name centred, so the layout is real.
-            -->
+            <!-- Customer (primary remote) feed. The bridge attaches the
+                 dominant speaker's video track to this <video> element
+                 via a watch above; until a remote participant joins,
+                 the gradient + name placeholder shows behind. -->
+            <video
+                ref="remoteVideoEl"
+                class="absolute inset-0 h-full w-full object-cover"
+                :class="{ 'opacity-0': !primaryRemote?.videoTrack }"
+                autoplay
+                playsinline
+            ></video>
             <div
+                v-if="!primaryRemote?.videoTrack"
                 class="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_#1a2238,_#05080f)]"
             ></div>
-            <div class="absolute inset-0 flex items-center justify-center">
+            <div
+                v-if="!primaryRemote?.videoTrack"
+                class="absolute inset-0 flex items-center justify-center"
+            >
                 <div class="text-center">
                     <div class="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-white/5 ring-1 ring-white/10">
                         <span class="text-2xl font-semibold text-white/80">
@@ -296,10 +392,14 @@ const customerLabel = computed(() => props.intent?.leadName ?? 'Connecting…');
                     </div>
                     <div class="mt-3 text-lg font-medium">{{ customerLabel }}</div>
                     <div class="mt-1 text-xs uppercase tracking-[0.2em] text-white/40">
-                        Awaiting video stream
+                        {{ bridge.state.value === 'connected' ? 'Awaiting customer' : 'Connecting…' }}
                     </div>
                 </div>
             </div>
+
+            <!-- Hidden mount for remote audio tracks — keeps audio
+                 audible even when the speaker isn't on the main canvas. -->
+            <div ref="remoteAudioMount" class="hidden" aria-hidden="true"></div>
 
             <!-- Recording badge — top-left, ugly-on-purpose, always visible -->
             <div class="absolute left-4 top-4 flex items-center gap-2 rounded-md bg-rose-600/90 px-2.5 py-1 ring-2 ring-rose-300/40">
@@ -333,10 +433,10 @@ const customerLabel = computed(() => props.intent?.leadName ?? 'Connecting…');
         <aside
             class="flex w-[340px] shrink-0 flex-col gap-3 border-l border-white/5 bg-black/40 p-3"
         >
-            <!-- Self-view -->
+            <!-- Self-view — bridge.localVideoTrack attached via watch -->
             <div class="relative aspect-video overflow-hidden rounded-md bg-black ring-1 ring-white/10">
                 <video
-                    ref="selfVideo"
+                    ref="selfVideoEl"
                     class="h-full w-full object-cover"
                     autoplay
                     muted
@@ -460,7 +560,7 @@ const customerLabel = computed(() => props.intent?.leadName ?? 'Connecting…');
                         ? 'bg-rose-500/85 text-white hover:bg-rose-500'
                         : 'bg-white/5 text-white/80 hover:bg-white/15'"
                     :title="muted ? 'Unmute (mic off)' : 'Mute (mic on)'"
-                    @click="muted = !muted"
+                    @click="onToggleMute"
                 >
                     <WarRoomIcon :name="muted ? 'volume-off' : 'volume'" class="h-4 w-4" />
                 </button>
@@ -471,7 +571,7 @@ const customerLabel = computed(() => props.intent?.leadName ?? 'Connecting…');
                         ? 'bg-rose-500/85 text-white hover:bg-rose-500'
                         : 'bg-white/5 text-white/80 hover:bg-white/15'"
                     :title="cameraOn ? 'Turn camera off' : 'Turn camera on'"
-                    @click="cameraOn = !cameraOn"
+                    @click="onToggleCamera"
                 >
                     <!-- using grid as a stand-in camera icon to avoid bloating the icon set -->
                     <WarRoomIcon name="grid" class="h-4 w-4" />
@@ -482,8 +582,8 @@ const customerLabel = computed(() => props.intent?.leadName ?? 'Connecting…');
                     :class="sharing
                         ? 'bg-floor-accent/85 text-deck-bg hover:bg-floor-accentHi'
                         : 'bg-white/5 text-white/80 hover:bg-white/15'"
-                    :title="sharing ? 'Stop sharing' : 'Share screen'"
-                    @click="sharing = !sharing"
+                    :title="sharing ? 'Stop sharing (coming soon)' : 'Share screen (coming soon)'"
+                    @click="onToggleShare"
                 >
                     <WarRoomIcon name="broadcast" class="h-4 w-4" />
                 </button>

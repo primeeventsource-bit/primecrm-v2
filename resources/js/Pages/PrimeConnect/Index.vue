@@ -24,10 +24,17 @@
  * later replaces the <video> srcObject in ActiveCall — the rest of the
  * UI doesn't move.
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AppLayout from '@/Layouts/AppLayout.vue';
 import Lobby from '@/Components/PrimeConnect/Lobby.vue';
 import ActiveCall from '@/Components/PrimeConnect/ActiveCall.vue';
+import { usePrimeConnectCall, type CallIntent } from '@/Composables/usePrimeConnectCall';
+
+/* The page owns one call. The composable bundles useTwilioBridge plus
+ * the call lifecycle (POST /rooms → mint token → Video.connect →
+ * DELETE /rooms on end). ActiveCall.vue receives the bridge as a prop
+ * so it can attach() local + remote tracks to its <video> elements. */
+const pcCall = usePrimeConnectCall();
 
 type LobbyTab = 'active' | 'scheduled' | 'history' | 'recordings';
 type View = 'lobby' | 'call';
@@ -36,15 +43,23 @@ const tab = ref<LobbyTab>('active');
 const view = ref<View>('lobby');
 
 /* ──────────────────────────────────────────────────────────────────────
- * Twilio service-health pill. Until the access-token endpoint is wired,
- * we treat the connection as healthy by default; a real implementation
- * subscribes to Twilio Video's `connectionStateChanged` (or polls a
- * /api/twilio/health endpoint) and downgrades this to 'degraded' or
- * 'offline' so the rest of the UI can render fallback affordances
- * (e.g. voice-only mode) instead of dead buttons.
+ * Twilio service-health pill — driven by the bridge state. While in
+ * the lobby (no active call) we show 'connected' optimistically; once
+ * a call is in flight, we map bridge.state to the pill states. A
+ * 'reconnecting' bridge state surfaces as 'degraded' so the user sees
+ * the wobble before video freezes; 'failed' surfaces as 'offline'.
  * ──────────────────────────────────────────────────────────────────── */
 type TwilioState = 'connected' | 'degraded' | 'offline';
-const twilioState = ref<TwilioState>('connected');
+const twilioState = computed<TwilioState>(() => {
+    const s = pcCall.bridge.state.value;
+    if (s === 'reconnecting') return 'degraded';
+    if (s === 'failed') return 'offline';
+    // idle / fetching-token / acquiring-media / connecting / connected
+    // / disconnected all render as 'connected' for the pill (we don't
+    // want a 'connecting' flash on the pill — it's a service-health
+    // signal, not a call-progress signal).
+    return 'connected';
+});
 
 const twilioPillClass = computed(() => {
     switch (twilioState.value) {
@@ -102,25 +117,62 @@ onBeforeUnmount(() => { if (ticker !== undefined) window.clearInterval(ticker); 
 /* ──────────────────────────────────────────────────────────────────────
  * View transitions. The lobby emits "start" with a session intent (a
  * scheduled-call id, a lead id, or null for an instant ad-hoc call);
- * the active-call view emits "end" when the user hangs up. The shell
- * just routes between the two — neither child knows about the other.
+ * the active-call view emits "end" when the user hangs up.
+ *
+ * Real Twilio wiring (added in this commit):
+ *   - startCall() awaits the composable's start() which provisions a
+ *     room server-side AND connects Video.connect() with a fresh JWT.
+ *     We flip view to 'call' BEFORE awaiting so ActiveCall.vue renders
+ *     immediately (with the bridge in 'fetching-token' / 'connecting'
+ *     state) — the page feels instant and ActiveCall shows its own
+ *     connection-quality pill that reflects bridge state.
+ *   - endCall() awaits end() which disconnects the bridge (releases
+ *     camera/mic) AND DELETEs the room. Best-effort: the local
+ *     disconnect always completes even if the server call fails.
  * ──────────────────────────────────────────────────────────────────── */
-interface CallIntent {
-    leadId: string | null;
-    leadName: string | null;
-    scheduledCallId: string | null;
-}
-const callIntent = ref<CallIntent | null>(null);
+const startError = ref<string | null>(null);
 
-function startCall(intent: CallIntent): void {
-    callIntent.value = intent;
+async function startCall(intent: CallIntent): Promise<void> {
+    startError.value = null;
     view.value = 'call';
+    try {
+        await pcCall.start(intent, { role: 'agent' });
+    } catch (e: unknown) {
+        // Rollback on failure — user lands back in the lobby with the
+        // error message visible. The bridge already cleaned up tracks.
+        startError.value = pcCall.lastError.value
+            ?? (e instanceof Error ? e.message : 'Could not start the call.');
+        view.value = 'lobby';
+    }
 }
-function endCall(): void {
-    callIntent.value = null;
+
+async function endCall(): Promise<void> {
+    await pcCall.end();
     view.value = 'lobby';
     tab.value = 'history'; // drop them on the just-ended call's row
 }
+
+// Browser-tab-close safety net — disconnect the room so we don't leak
+// a Twilio session (billed per participant-minute) when the user
+// closes the tab mid-call.
+onBeforeUnmount(() => {
+    if (pcCall.active.value !== null) {
+        void pcCall.end();
+    }
+});
+
+// Auto-recover from a transient failure: if the bridge dies during a
+// connect, fall back to the lobby so the user isn't stuck on a black
+// screen. The bridge's state-change watch catches this; we just react.
+watch(
+    () => pcCall.bridge.state.value,
+    (s) => {
+        if ((s === 'failed' || s === 'disconnected') && view.value === 'call') {
+            view.value = 'lobby';
+            startError.value = pcCall.bridge.lastError.value ?? startError.value;
+        }
+    },
+);
 </script>
 
 <template>
@@ -180,6 +232,16 @@ function endCall(): void {
                 </span>
             </div>
 
+            <!-- Connect-error banner — only when the most recent start
+                 attempt failed and we bounced back to the lobby. Cleared
+                 on the next start attempt. -->
+            <div
+                v-if="startError"
+                class="border-b border-floor-lose/30 bg-floor-lose/10 px-6 py-2 text-sm text-floor-lose"
+            >
+                <strong class="font-semibold">Could not start the call:</strong> {{ startError }}
+            </div>
+
             <!-- Lobby body -->
             <div class="flex-1 overflow-auto">
                 <Lobby
@@ -192,14 +254,19 @@ function endCall(): void {
         </div>
 
         <!--
-          Active call view — full-bleed inside the slot. Owns its own
-          tick via useCallTimer; we don't pass nowMs because the timer
-          composable handles its own interval anchored to answered_at.
+          Active call view — full-bleed inside the slot.
+          - intent + answeredAt come from the composable (real Twilio
+            connection lifecycle, not placeholder state).
+          - bridge is passed so the child can attach() local + remote
+            tracks to its <video> elements. The bridge is reactive so
+            adding a remote participant mid-call just lights up.
         -->
         <ActiveCall
             v-else
-            :intent="callIntent"
+            :intent="pcCall.active.value?.intent ?? null"
+            :answered-at="pcCall.active.value?.answeredAt ?? null"
             :twilio-state="twilioState"
+            :bridge="pcCall.bridge"
             @end="endCall"
         />
     </AppLayout>
