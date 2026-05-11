@@ -75,6 +75,10 @@ const props = defineProps<{
     intent: CallIntent | null;
     /** ISO timestamp the local participant entered the room; null until connect resolves. */
     answeredAt: string | null;
+    /** Twilio room name — load-bearing for the invite-link feature. */
+    roomName: string | null;
+    /** DB row id of the room (empty string when we joined someone else's). */
+    roomId: string | null;
     twilioState: 'connected' | 'degraded' | 'offline';
     /**
      * The Twilio bridge instance owned by Pages/PrimeConnect/Index.vue.
@@ -220,6 +224,53 @@ const sharing = ref(false);
 function onToggleMute(): void { props.bridge.toggleAudio(); }
 function onToggleCamera(): void { props.bridge.toggleVideo(); }
 function onToggleShare(): void { sharing.value = !sharing.value; /* TODO: getDisplayMedia */ }
+
+/* ──────────────────────────────────────────────────────────────────────
+ * Invite link — drops a `?join=<room>&roomId=<id>` URL in clipboard.
+ * The recipient opens it (in this same tenant — invite is auth-gated
+ * via the page's existing auth:sanctum middleware), Index.vue's onMount
+ * picks up the param, and they land in the same Twilio room.
+ *
+ * Customer-facing guest invites are a separate feature — those need a
+ * public route + a guest-token mint endpoint. This one is for agent-
+ * to-supervisor and agent-to-agent collab calls.
+ * ──────────────────────────────────────────────────────────────────── */
+const inviteCopied = ref(false);
+const inviteLink = computed(() => {
+    if (!props.roomName) return null;
+    const params = new URLSearchParams({
+        join: props.roomName,
+        roomId: props.roomId ?? '',
+    });
+    return `${window.location.origin}/prime-connect?${params.toString()}`;
+});
+let inviteResetTimer: number | undefined;
+async function copyInvite(): Promise<void> {
+    if (!inviteLink.value) return;
+    try {
+        await navigator.clipboard.writeText(inviteLink.value);
+        inviteCopied.value = true;
+        if (inviteResetTimer !== undefined) window.clearTimeout(inviteResetTimer);
+        inviteResetTimer = window.setTimeout(() => (inviteCopied.value = false), 2200);
+    } catch {
+        // Some browsers reject clipboard writes without a recent user
+        // gesture or insecure contexts; fall back to a selection prompt.
+        window.prompt('Copy this invite link:', inviteLink.value);
+    }
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+ * Participant count — local participant + every connected remote.
+ * Drives a small badge on the main canvas so you can see at a glance
+ * that someone else has joined (without staring at the dominant-
+ * speaker tile).
+ * ──────────────────────────────────────────────────────────────────── */
+const participantCount = computed(() => {
+    const remotes = props.bridge.remoteParticipants.value.size;
+    // +1 for the local participant when we're connected.
+    const local = props.bridge.state.value === 'connected' ? 1 : 0;
+    return remotes + local;
+});
 
 /* ──────────────────────────────────────────────────────────────────────
  * Side drawers. Notes + pipeline + AI assist all open in the same
@@ -425,6 +476,33 @@ const customerLabel = computed(() => props.intent?.leadName ?? 'Connecting…');
                     Customer
                 </div>
             </div>
+
+            <!-- Participant count badge — top-center, surfaces "someone
+                 joined" without staring at the dominant-speaker tile.
+                 Only renders when >1 (i.e., someone other than you). -->
+            <div
+                v-if="participantCount > 1"
+                class="absolute left-1/2 top-4 -translate-x-1/2 rounded-md bg-black/55 px-3 py-1 text-xs ring-1 ring-white/10"
+            >
+                <span class="font-mono tabular-nums text-white">{{ participantCount }}</span>
+                <span class="ml-1 text-white/60">in room</span>
+            </div>
+
+            <!-- Invite link button — bottom-right of the main feed.
+                 Solo-call affordance: the inviter clicks once, gets
+                 ?join=… in their clipboard, opens it elsewhere. -->
+            <button
+                v-if="inviteLink"
+                type="button"
+                class="absolute bottom-24 right-4 inline-flex items-center gap-2 rounded-md bg-black/55 px-3 py-2 text-xs ring-1 ring-white/10 transition-colors hover:bg-black/70"
+                :title="inviteLink"
+                @click="copyInvite"
+            >
+                <WarRoomIcon name="broadcast" class="h-3.5 w-3.5" />
+                <span class="font-mono uppercase tracking-wider">
+                    {{ inviteCopied ? 'Copied ✓' : 'Copy invite link' }}
+                </span>
+            </button>
         </section>
 
         <!-- ════════════════════════════════════════════════════════════

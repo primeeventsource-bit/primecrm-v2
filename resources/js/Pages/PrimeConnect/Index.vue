@@ -111,7 +111,31 @@ function onCountsUpdate(next: Record<LobbyTab, number>): void {
  * ──────────────────────────────────────────────────────────────────── */
 const nowMs = ref(Date.now());
 let ticker: number | undefined;
-onMounted(() => { ticker = window.setInterval(() => (nowMs.value = Date.now()), 1000); });
+onMounted(() => {
+    ticker = window.setInterval(() => (nowMs.value = Date.now()), 1000);
+
+    // Invite-link landing — if the URL carries ?join=<room_name>, jump
+    // straight into joining that room. We strip the param from the URL
+    // after firing so a tab refresh doesn't re-trigger and a re-share of
+    // the page URL from this point doesn't carry stale state. The room
+    // id (when present) lets end() know NOT to delete the room — the
+    // inviter owns the lifecycle, the invitee just participates.
+    const params = new URLSearchParams(window.location.search);
+    const joinRoomName = params.get('join');
+    const joinRoomId = params.get('roomId') ?? '';
+    if (joinRoomName) {
+        try {
+            params.delete('join');
+            params.delete('roomId');
+            const cleanQuery = params.toString();
+            const cleanUrl = window.location.pathname
+                + (cleanQuery ? `?${cleanQuery}` : '')
+                + window.location.hash;
+            window.history.replaceState({}, '', cleanUrl);
+        } catch { /* history API unavailable — non-fatal */ }
+        void joinExistingCall(joinRoomName, joinRoomId);
+    }
+});
 onBeforeUnmount(() => { if (ticker !== undefined) window.clearInterval(ticker); });
 
 /* ──────────────────────────────────────────────────────────────────────
@@ -142,6 +166,26 @@ async function startCall(intent: CallIntent): Promise<void> {
         // error message visible. The bridge already cleaned up tracks.
         startError.value = pcCall.lastError.value
             ?? (e instanceof Error ? e.message : 'Could not start the call.');
+        view.value = 'lobby';
+    }
+}
+
+/**
+ * Join an existing room (invite-link path). Skips POST /rooms; the
+ * server mints a token scoped to the existing room name and the
+ * bridge connects. Same UX as startCall otherwise.
+ */
+async function joinExistingCall(roomName: string, roomId: string): Promise<void> {
+    startError.value = null;
+    view.value = 'call';
+    try {
+        await pcCall.start(
+            { leadId: null, leadName: 'Joining session', scheduledCallId: null },
+            { role: 'agent', joinRoomName: roomName, joinRoomId: roomId },
+        );
+    } catch (e: unknown) {
+        startError.value = pcCall.lastError.value
+            ?? (e instanceof Error ? e.message : 'Could not join the call.');
         view.value = 'lobby';
     }
 }
@@ -265,6 +309,8 @@ watch(
             v-else
             :intent="pcCall.active.value?.intent ?? null"
             :answered-at="pcCall.active.value?.answeredAt ?? null"
+            :room-name="pcCall.active.value?.roomName ?? null"
+            :room-id="pcCall.active.value?.roomId ?? null"
             :twilio-state="twilioState"
             :bridge="pcCall.bridge"
             @end="endCall"
