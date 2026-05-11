@@ -324,6 +324,15 @@ const openChargebackCount = computed(() =>
                             <a v-if="dossier.profile.email" :href="`mailto:${dossier.profile.email}`" class="btn-ghost text-xs">✉ Email</a>
                             <button class="btn-ghost text-xs" disabled title="Coming in D6">+ New agreement</button>
                             <button class="btn-ghost text-xs" disabled title="Coming in D6">Open refund case</button>
+                            <!-- AG-audit evidence package (D9) — opens in new tab so the
+                                 download dialog doesn't navigate away from the profile. -->
+                            <a
+                                :href="`/api/compliance/audit-export/owner/${dossier.profile.id}`"
+                                target="_blank"
+                                rel="noopener"
+                                class="btn-ghost text-xs"
+                                title="Generate AG-audit-ready compliance evidence package"
+                            >📂 Audit export</a>
                         </div>
                     </div>
 

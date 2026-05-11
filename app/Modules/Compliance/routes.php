@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use App\Modules\Compliance\Http\Controllers\AuditExportController;
 use App\Modules\Compliance\Http\Controllers\ChargebackCaseController;
 use App\Modules\Compliance\Http\Controllers\ComplianceRecordingController;
 use App\Modules\Compliance\Http\Controllers\ConsentController;
@@ -57,6 +58,12 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
         // for any free-form text shown to or composed for owners.
         Route::post('/phrase-check', [ProhibitedPhraseController::class, 'check'])
             ->name('api.compliance.phrase_check');
+
+        // AG-audit-ready evidence export (D9).
+        Route::get('/audit-export/owner/{ownerId}', [AuditExportController::class, 'forOwner'])
+            ->whereUuid('ownerId')->name('api.compliance.audit_export.owner');
+        Route::get('/audit-export/agreement/{dealId}', [AuditExportController::class, 'forAgreement'])
+            ->whereUuid('dealId')->name('api.compliance.audit_export.agreement');
     });
 
     // AI Live Coach (D8) — under /api/coach to keep it discoverable
