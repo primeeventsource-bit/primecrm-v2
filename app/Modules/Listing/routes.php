@@ -6,6 +6,7 @@ use App\Modules\Listing\Http\Controllers\ListingController;
 use App\Modules\Listing\Http\Controllers\ListingDistributionController;
 use App\Modules\Listing\Http\Controllers\OwnerController;
 use App\Modules\Listing\Http\Controllers\PartnerSiteController;
+use App\Modules\Listing\Http\Controllers\PartnerWebhookController;
 use App\Modules\Listing\Http\Controllers\RentalBookingController;
 use App\Modules\Listing\Http\Controllers\RentalInquiryController;
 use Illuminate\Support\Facades\Route;
@@ -48,15 +49,25 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
             ->whereUuid('rowId')->name('api.listings.distributions.sync');
     });
 
-    // Partner-site config (settings page).
+    // Partner-site config (settings page). Create + destroy + rotate
+    // are supervisor-gated inside the controller; index/show/update are
+    // open to anyone in the tenant.
     Route::get('/partner-sites', [PartnerSiteController::class, 'index'])
         ->name('api.partner_sites.index');
+    Route::post('/partner-sites', [PartnerSiteController::class, 'store'])
+        ->name('api.partner_sites.store');
     Route::get('/partner-sites/{id}', [PartnerSiteController::class, 'show'])
         ->whereUuid('id')
         ->name('api.partner_sites.show');
     Route::patch('/partner-sites/{id}', [PartnerSiteController::class, 'update'])
         ->whereUuid('id')
         ->name('api.partner_sites.update');
+    Route::delete('/partner-sites/{id}', [PartnerSiteController::class, 'destroy'])
+        ->whereUuid('id')
+        ->name('api.partner_sites.destroy');
+    Route::post('/partner-sites/{id}/rotate-secret', [PartnerSiteController::class, 'rotateSecret'])
+        ->whereUuid('id')
+        ->name('api.partner_sites.rotate_secret');
 
     // Renter inquiry actions (D5).
     Route::prefix('/rental-inquiries/{id}')->whereUuid('id')->group(function (): void {
@@ -71,4 +82,19 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
     // Renter-side bookings ledger (the success-metric view).
     Route::get('/rental-bookings', [RentalBookingController::class, 'index'])
         ->name('api.rental_bookings.index');
+});
+
+/*
+ * PUBLIC partner webhook ingest. NO auth middleware — the HMAC
+ * signature inside the controller is the auth boundary. The slug
+ * identifies which partner_site (and therefore which tenant) the
+ * payload belongs to; TenantContext is set from the row.
+ *
+ * Slug regex matches our internal slugify() output: lowercase
+ * alphanumeric with internal dashes only.
+ */
+Route::prefix('/partner-webhooks')->group(function (): void {
+    Route::post('/{slug}/inquiries', [PartnerWebhookController::class, 'inquiry'])
+        ->where('slug', '[a-z0-9][a-z0-9-]*[a-z0-9]')
+        ->name('api.partner_webhooks.inquiry');
 });

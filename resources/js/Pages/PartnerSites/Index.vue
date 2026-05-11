@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import axios from 'axios';
+import { usePage } from '@inertiajs/vue3';
 import AppLayout from '@/Layouts/AppLayout.vue';
+import type { PageProps } from '@/types/api';
 
 /**
  * Partner-sites configuration + performance metrics.
@@ -9,14 +11,28 @@ import AppLayout from '@/Layouts/AppLayout.vue';
  * Lists every partner channel we push timeshare listings to, with
  * push counters per status (live / pending / rejected / paused) and
  * total views + inquiries. Editable: name, active toggle, per-listing
- * cost, API endpoint. Credentials live encrypted on the model and
- * are not surfaced to the UI in plaintext (only "configured Y/N").
+ * cost, API endpoint. Credentials live encrypted on the model and are
+ * not surfaced to the UI in plaintext (only "configured Y/N").
  *
- * Adding a real integration is a backend code change (implement
- * PartnerDriver, register in ListingDistributor::DRIVER_MAP); the
- * UI here surfaces whether each site has a real driver via
- * has_real_driver so operators know which sites use the mock fallback.
+ * Two-way integration: each site exposes an HMAC-signed webhook URL
+ * that partners POST inquiries back into. The CRM is the operator's
+ * back office; every partner-channel inquiry surfaces in /listings.
+ * Webhook secrets are shown ONCE on create or rotate — the operator
+ * is expected to paste it into the partner's integration config
+ * immediately and not see it again. The secret-reveal panel is sticky
+ * until dismissed.
+ *
+ * Adding a real driver (push side) is still a backend change — see
+ * ListingDistributor::DRIVER_MAP. The UI surfaces which slugs have a
+ * real driver via has_real_driver.
  */
+
+const page = usePage<PageProps>();
+const supervisorRoles = ['master_admin', 'admin', 'supervisor', 'manager'];
+const canManageSites = computed(() => {
+    const role = page.props.auth.user?.role ?? '';
+    return supervisorRoles.includes(role);
+});
 
 interface SiteStats {
     pushes_total: number;
@@ -37,6 +53,9 @@ interface Site {
     our_cost_per_listing: number | null;
     has_config: boolean;
     has_real_driver: boolean;
+    has_webhook_secret: boolean;
+    webhook_inquiry_url: string;
+    webhook_last_received_at: string | null;
     created_at: string | null;
     stats: SiteStats;
 }
@@ -48,6 +67,150 @@ const editForm = ref<Partial<Site>>({});
 const saving = ref(false);
 const flash = ref<{ kind: 'ok' | 'err'; msg: string } | null>(null);
 
+/* ──────────────────────────────────────────────────────────────────────
+ * CREATE — slide-down form revealed by the "Add partner site" button.
+ * ──────────────────────────────────────────────────────────────────── */
+const showCreate = ref(false);
+const createForm = ref<{
+    name: string;
+    slug: string;
+    api_endpoint: string;
+    our_cost_per_listing: string;
+    is_active: boolean;
+}>({ name: '', slug: '', api_endpoint: '', our_cost_per_listing: '', is_active: true });
+const createErrors = ref<Record<string, string[]>>({});
+const creating = ref(false);
+
+function resetCreateForm(): void {
+    createForm.value = { name: '', slug: '', api_endpoint: '', our_cost_per_listing: '', is_active: true };
+    createErrors.value = {};
+}
+
+async function submitCreate(): Promise<void> {
+    creating.value = true;
+    createErrors.value = {};
+    try {
+        const payload: Record<string, unknown> = {
+            name: createForm.value.name,
+            is_active: createForm.value.is_active,
+        };
+        if (createForm.value.slug.trim()) payload.slug = createForm.value.slug.trim();
+        if (createForm.value.api_endpoint.trim()) payload.api_endpoint = createForm.value.api_endpoint.trim();
+        if (createForm.value.our_cost_per_listing.trim()) {
+            payload.our_cost_per_listing = Number(createForm.value.our_cost_per_listing);
+        }
+        const { data } = await axios.post<{ data: Site; webhook: { secret: string; inquiry_url: string } }>(
+            '/api/partner-sites',
+            payload,
+        );
+        // The create response carries the plaintext secret — pin it
+        // into the sticky reveal panel so the operator can copy it.
+        secretReveal.value = {
+            siteId: data.data.id,
+            siteName: data.data.name,
+            secret: data.webhook.secret,
+            inquiryUrl: data.webhook.inquiry_url,
+        };
+        flash.value = { kind: 'ok', msg: `Partner site "${data.data.name}" created.` };
+        showCreate.value = false;
+        resetCreateForm();
+        await load();
+    } catch (e: unknown) {
+        const resp = (e as { response?: { status?: number; data?: { errors?: Record<string, string[]>; message?: string } } }).response;
+        if (resp?.status === 422 && resp.data?.errors) {
+            createErrors.value = resp.data.errors;
+        } else {
+            flash.value = { kind: 'err', msg: resp?.data?.message ?? 'Could not create partner site.' };
+        }
+    } finally {
+        creating.value = false;
+    }
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+ * SECRET REVEAL — sticky banner shown once after create / rotate.
+ * Persists across navigation within the page until the operator
+ * dismisses it; we never display the secret again after that.
+ * ──────────────────────────────────────────────────────────────────── */
+interface SecretReveal {
+    siteId: string;
+    siteName: string;
+    secret: string;
+    inquiryUrl: string;
+}
+const secretReveal = ref<SecretReveal | null>(null);
+const secretCopied = ref(false);
+async function copySecret(): Promise<void> {
+    if (!secretReveal.value) return;
+    try {
+        await navigator.clipboard.writeText(secretReveal.value.secret);
+        secretCopied.value = true;
+        window.setTimeout(() => (secretCopied.value = false), 2200);
+    } catch {
+        window.prompt('Copy this webhook secret:', secretReveal.value.secret);
+    }
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+ * ROTATE + ARCHIVE
+ * ──────────────────────────────────────────────────────────────────── */
+const rotatingId = ref<string | null>(null);
+async function rotateSecret(s: Site): Promise<void> {
+    if (!window.confirm(`Rotate the webhook secret for ${s.name}? The old secret will stop working immediately.`)) return;
+    rotatingId.value = s.id;
+    try {
+        const { data } = await axios.post<{ webhook: { secret: string; inquiry_url: string } }>(
+            `/api/partner-sites/${s.id}/rotate-secret`,
+        );
+        secretReveal.value = {
+            siteId: s.id,
+            siteName: s.name,
+            secret: data.webhook.secret,
+            inquiryUrl: data.webhook.inquiry_url,
+        };
+        flash.value = { kind: 'ok', msg: `Webhook secret rotated for ${s.name}.` };
+        await load();
+    } catch {
+        flash.value = { kind: 'err', msg: 'Could not rotate secret.' };
+    } finally {
+        rotatingId.value = null;
+    }
+}
+
+const archivingId = ref<string | null>(null);
+async function archiveSite(s: Site): Promise<void> {
+    if (!window.confirm(`Archive ${s.name}? Existing pushes + inquiries stay in history; the site stops accepting new ones.`)) return;
+    archivingId.value = s.id;
+    try {
+        await axios.delete(`/api/partner-sites/${s.id}`);
+        flash.value = { kind: 'ok', msg: `${s.name} archived.` };
+        await load();
+    } catch {
+        flash.value = { kind: 'err', msg: 'Could not archive partner site.' };
+    } finally {
+        archivingId.value = null;
+    }
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+ * COPY HELPERS
+ * ──────────────────────────────────────────────────────────────────── */
+const copiedUrlForSite = ref<string | null>(null);
+async function copyWebhookUrl(s: Site): Promise<void> {
+    try {
+        await navigator.clipboard.writeText(s.webhook_inquiry_url);
+        copiedUrlForSite.value = s.id;
+        window.setTimeout(() => {
+            if (copiedUrlForSite.value === s.id) copiedUrlForSite.value = null;
+        }, 2200);
+    } catch {
+        window.prompt('Copy this webhook URL:', s.webhook_inquiry_url);
+    }
+}
+
+/* ──────────────────────────────────────────────────────────────────────
+ * LOAD + EXISTING EDIT FLOW
+ * ──────────────────────────────────────────────────────────────────── */
 async function load(): Promise<void> {
     loading.value = true;
     try {
@@ -109,17 +272,177 @@ function fmtMoney(n: number | null | undefined): string {
     if (!n) return '$0';
     return '$' + n.toFixed(2);
 }
+
+function fmtRelative(iso: string | null): string {
+    if (!iso) return 'never';
+    const diffMs = Date.now() - Date.parse(iso);
+    const mins = Math.floor(diffMs / 60_000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins}m ago`;
+    const h = Math.floor(mins / 60);
+    if (h < 24) return `${h}h ago`;
+    const d = Math.floor(h / 24);
+    return `${d}d ago`;
+}
 </script>
 
 <template>
     <AppLayout title="Partner sites">
         <div class="p-6">
             <!-- Header -->
-            <div class="mb-4">
-                <h1 class="text-2xl font-semibold text-deck-text">Partner sites</h1>
-                <p class="text-sm text-deck-soft">
-                    Where listings get pushed. Each site has its own driver — real integrations replace the mock one as they ship.
-                </p>
+            <div class="mb-4 flex items-start justify-between gap-4">
+                <div>
+                    <h1 class="text-2xl font-semibold text-deck-text">Partner sites</h1>
+                    <p class="text-sm text-deck-soft">
+                        Where listings get pushed AND where renter inquiries flow back from.
+                        Each site has its own driver (outbound) and a signed webhook URL (inbound).
+                    </p>
+                </div>
+                <button
+                    v-if="canManageSites"
+                    type="button"
+                    class="btn-primary"
+                    @click="showCreate = !showCreate"
+                >
+                    {{ showCreate ? 'Cancel' : '+ Add partner site' }}
+                </button>
+            </div>
+
+            <!-- Secret reveal — sticky until dismissed -->
+            <div
+                v-if="secretReveal"
+                class="mb-4 rounded-md border-2 border-floor-accent/50 bg-floor-accent/[0.08] p-4"
+            >
+                <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0 flex-1">
+                        <div class="text-sm font-semibold text-floor-accent">
+                            Webhook secret for {{ secretReveal.siteName }}
+                        </div>
+                        <p class="mt-1 text-xs text-deck-soft">
+                            Copy this now — it will <strong>not</strong> be shown again.
+                            Paste it into your integration with the partner so they can sign inbound webhooks.
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        class="btn-ghost text-xs"
+                        title="Dismiss"
+                        @click="secretReveal = null"
+                    >Dismiss</button>
+                </div>
+
+                <div class="mt-3 space-y-2">
+                    <div>
+                        <div class="deck-label">Secret</div>
+                        <div class="mt-1 flex items-center gap-2">
+                            <code class="flex-1 truncate rounded bg-deck-bg/70 px-3 py-2 font-mono text-sm text-floor-accent ring-1 ring-deck-line">
+                                {{ secretReveal.secret }}
+                            </code>
+                            <button class="btn-ghost text-xs" @click="copySecret">
+                                {{ secretCopied ? 'Copied ✓' : 'Copy' }}
+                            </button>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="deck-label">Inquiry webhook URL</div>
+                        <code class="mt-1 block truncate rounded bg-deck-bg/70 px-3 py-2 font-mono text-xs text-deck-soft ring-1 ring-deck-line">
+                            {{ secretReveal.inquiryUrl }}
+                        </code>
+                    </div>
+                    <p class="font-mono text-[10px] uppercase tracking-wider text-deck-dim">
+                        Partner signs the raw request body with HMAC-SHA256
+                        using this secret, sends as <code>X-Partner-Signature: sha256=&lt;hex&gt;</code>.
+                    </p>
+                </div>
+            </div>
+
+            <!-- Create form -->
+            <div v-if="showCreate" class="deck-card mb-4 p-5">
+                <h2 class="text-base font-semibold text-deck-text">New partner site</h2>
+                <p class="text-xs text-deck-dim">Saving generates a webhook secret you'll see once.</p>
+
+                <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div>
+                        <label class="label">Name <span class="text-floor-lose">*</span></label>
+                        <input
+                            v-model="createForm.name"
+                            type="text"
+                            class="input mt-1"
+                            placeholder="e.g. Airbnb, RedWeek, Vrbo"
+                            :disabled="creating"
+                        />
+                        <div v-if="createErrors.name" class="mt-1 text-xs text-floor-lose">
+                            {{ createErrors.name[0] }}
+                        </div>
+                    </div>
+                    <div>
+                        <label class="label">Slug <span class="text-deck-dim">(optional — auto-derived from name)</span></label>
+                        <input
+                            v-model="createForm.slug"
+                            type="text"
+                            class="input mt-1 font-mono"
+                            placeholder="airbnb"
+                            :disabled="creating"
+                        />
+                        <div v-if="createErrors.slug" class="mt-1 text-xs text-floor-lose">
+                            {{ createErrors.slug[0] }}
+                        </div>
+                        <p class="mt-1 text-[10px] text-deck-dim">
+                            Must match the ListingDistributor driver key to use a real (non-mock) push driver.
+                        </p>
+                    </div>
+                </div>
+
+                <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div>
+                        <label class="label">API endpoint <span class="text-deck-dim">(optional)</span></label>
+                        <input
+                            v-model="createForm.api_endpoint"
+                            type="url"
+                            class="input mt-1 font-mono"
+                            placeholder="https://api.partner.example/v2"
+                            :disabled="creating"
+                        />
+                        <div v-if="createErrors.api_endpoint" class="mt-1 text-xs text-floor-lose">
+                            {{ createErrors.api_endpoint[0] }}
+                        </div>
+                    </div>
+                    <div>
+                        <label class="label">Per-listing cost (USD) <span class="text-deck-dim">(optional)</span></label>
+                        <input
+                            v-model="createForm.our_cost_per_listing"
+                            type="number" min="0" step="0.01" max="9999.99"
+                            class="input mt-1"
+                            placeholder="0.00"
+                            :disabled="creating"
+                        />
+                        <div v-if="createErrors.our_cost_per_listing" class="mt-1 text-xs text-floor-lose">
+                            {{ createErrors.our_cost_per_listing[0] }}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mt-3">
+                    <label class="flex items-center gap-2 text-sm text-deck-soft">
+                        <input v-model="createForm.is_active" type="checkbox" class="rounded border-deck-line" :disabled="creating" />
+                        Active — allow new pushes immediately
+                    </label>
+                </div>
+
+                <div class="mt-4 flex justify-end gap-2">
+                    <button
+                        class="btn-ghost"
+                        :disabled="creating"
+                        @click="showCreate = false; resetCreateForm()"
+                    >Cancel</button>
+                    <button
+                        class="btn-primary"
+                        :disabled="creating || !createForm.name.trim()"
+                        @click="submitCreate"
+                    >
+                        {{ creating ? 'Creating…' : 'Create partner site' }}
+                    </button>
+                </div>
             </div>
 
             <!-- Flash -->
@@ -155,8 +478,18 @@ function fmtMoney(n: number | null | undefined): string {
             <div v-if="loading" class="panel p-6 text-sm text-deck-soft">Loading partner sites…</div>
 
             <!-- Empty -->
-            <div v-else-if="sites.length === 0" class="panel p-12 text-center text-sm text-deck-dim italic">
-                No partner sites configured. Run the seeder, or insert rows directly into <code>partner_sites</code>.
+            <div v-else-if="sites.length === 0" class="panel p-12 text-center text-sm text-deck-dim">
+                <div class="text-base">No partner sites configured yet.</div>
+                <p class="mt-2 max-w-md mx-auto italic">
+                    Add a site to start pushing listings out — and to get a unique webhook URL
+                    partners can post inquiries back to.
+                </p>
+                <button
+                    v-if="canManageSites"
+                    type="button"
+                    class="btn-primary mt-4"
+                    @click="showCreate = true"
+                >+ Add your first partner site</button>
             </div>
 
             <!-- Site cards -->
@@ -184,11 +517,17 @@ function fmtMoney(n: number | null | undefined): string {
                                 slug: {{ s.slug }} · {{ fmtMoney(s.our_cost_per_listing) }} per listing
                             </div>
                         </div>
-                        <button
-                            v-if="editingSiteId !== s.id"
-                            class="btn-ghost text-xs"
-                            @click="startEdit(s)"
-                        >Edit</button>
+                        <div v-if="editingSiteId !== s.id" class="flex gap-1">
+                            <button class="btn-ghost text-xs" @click="startEdit(s)">Edit</button>
+                            <button
+                                v-if="canManageSites"
+                                class="btn-ghost text-xs text-floor-lose hover:bg-floor-lose/10"
+                                :disabled="archivingId === s.id"
+                                @click="archiveSite(s)"
+                            >
+                                {{ archivingId === s.id ? 'Archiving…' : 'Archive' }}
+                            </button>
+                        </div>
                     </div>
 
                     <!-- Stats grid -->
@@ -225,7 +564,7 @@ function fmtMoney(n: number | null | undefined): string {
                             <div class="mt-1 deck-num text-base text-floor-accent">{{ s.stats.total_inquiries || '—' }}</div>
                         </div>
                         <div>
-                            <div class="deck-label">Configured?</div>
+                            <div class="deck-label">Push config</div>
                             <div class="mt-1 deck-num text-base"
                                  :class="s.has_config ? 'text-floor-win' : 'text-deck-dim'">
                                 {{ s.has_config ? '✓' : '—' }}
@@ -235,8 +574,55 @@ function fmtMoney(n: number | null | undefined): string {
 
                     <!-- API endpoint -->
                     <div v-if="s.api_endpoint && editingSiteId !== s.id" class="mt-3 text-xs">
-                        <div class="deck-label">Endpoint</div>
+                        <div class="deck-label">Partner endpoint (outbound)</div>
                         <div class="font-mono text-deck-soft mt-1 truncate">{{ s.api_endpoint }}</div>
+                    </div>
+
+                    <!-- Webhook panel — inbound. Always shown so partners can be
+                         pointed at the URL even if no inquiries have arrived yet. -->
+                    <div
+                        v-if="editingSiteId !== s.id"
+                        class="mt-4 rounded-md border border-deck-line bg-deck-bg/50 p-3"
+                    >
+                        <div class="flex items-center justify-between gap-2 mb-2">
+                            <div class="deck-label">Inbound webhook</div>
+                            <div class="text-[10px] font-mono uppercase tracking-wider text-deck-dim">
+                                last received: <span :class="s.webhook_last_received_at ? 'text-deck-soft' : 'text-deck-dim'">{{ fmtRelative(s.webhook_last_received_at) }}</span>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <code class="flex-1 truncate rounded bg-deck-bg/70 px-2 py-1.5 font-mono text-[11px] text-deck-soft ring-1 ring-deck-line">
+                                {{ s.webhook_inquiry_url }}
+                            </code>
+                            <button
+                                class="btn-ghost text-xs"
+                                title="Copy webhook URL"
+                                @click="copyWebhookUrl(s)"
+                            >
+                                {{ copiedUrlForSite === s.id ? 'Copied ✓' : 'Copy' }}
+                            </button>
+                        </div>
+                        <div class="mt-2 flex items-center justify-between gap-2">
+                            <span class="text-[11px] text-deck-dim">
+                                Secret status:
+                                <span :class="s.has_webhook_secret ? 'text-floor-win' : 'text-floor-lose'">
+                                    {{ s.has_webhook_secret ? 'configured' : 'not set' }}
+                                </span>
+                            </span>
+                            <button
+                                v-if="canManageSites"
+                                class="btn-ghost text-xs"
+                                :disabled="rotatingId === s.id"
+                                :title="s.has_webhook_secret
+                                    ? 'Rotate (invalidates the old secret immediately)'
+                                    : 'Mint a webhook secret'"
+                                @click="rotateSecret(s)"
+                            >
+                                {{ rotatingId === s.id
+                                    ? 'Rotating…'
+                                    : s.has_webhook_secret ? 'Rotate secret' : 'Mint secret' }}
+                            </button>
+                        </div>
                     </div>
 
                     <!-- Edit form -->
@@ -272,7 +658,8 @@ function fmtMoney(n: number | null | undefined): string {
                             </button>
                         </div>
                         <p class="text-[10px] font-mono uppercase tracking-wider text-deck-dim">
-                            Credentials are managed at the model layer (encrypted on the <code>config</code> column). API key changes still require a backend update.
+                            Outbound credentials live encrypted on the <code>config</code> column.
+                            Inbound webhook secret rotates via the panel above.
                         </p>
                     </div>
                 </div>

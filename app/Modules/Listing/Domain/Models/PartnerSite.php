@@ -10,6 +10,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Str;
 
 /**
  * An external marketing channel (Airbnb, Vrbo, RedWeek, etc).
@@ -35,6 +36,8 @@ final class PartnerSite extends Model
         'is_active',
         'our_cost_per_listing',
         'config',
+        'webhook_secret',
+        'webhook_last_received_at',
     ];
 
     protected function casts(): array
@@ -43,7 +46,31 @@ final class PartnerSite extends Model
             'is_active' => 'boolean',
             'our_cost_per_listing' => 'decimal:2',
             'config' => 'encrypted:array',
+            'webhook_last_received_at' => 'datetime',
         ];
+    }
+
+    /** Hidden from default array/json serialisation — secrets never
+     *  belong on the wire by accident. The controllers expose it
+     *  explicitly the one time it's shown to the user (create + rotate).
+     */
+    protected $hidden = ['webhook_secret'];
+
+    /**
+     * Generate (or regenerate) a webhook signing secret.
+     *
+     * 60 chars from a URL-safe alphabet → ~360 bits of entropy, well
+     * past what an HMAC needs. We hand the secret to the partner once
+     * and never again — they store it on their end and use it to sign
+     * outbound webhooks; we store it here and use it to verify.
+     */
+    public function rotateWebhookSecret(): string
+    {
+        $secret = Str::random(60);
+        $this->webhook_secret = $secret;
+        $this->save();
+
+        return $secret;
     }
 
     /* ----------------------------------------------------------------------
