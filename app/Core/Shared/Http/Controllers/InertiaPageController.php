@@ -158,4 +158,13 @@ final class InertiaPageController extends Controller
 
         return Inertia::render('Compliance/Hub');
     }
+
+    public function primeConnect(): Response
+    {
+        // Prime Connect — video calling surface. Lobby (device check +
+        // start/schedule/invite + active sessions) and ActiveCall views
+        // share the same shell so the Twilio service-health pill stays
+        // visible at all times.
+        return Inertia::render('PrimeConnect/Index');
+    }
 }

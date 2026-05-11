@@ -32,6 +32,7 @@ const sections = computed<NavSection[]>(() => [
         items: [
             { href: '/dashboard', label: 'Dashboard', icon: '◉', show: true },
             { href: '/dialer/console', label: 'Dialer', icon: '☎', show: true },
+            { href: '/prime-connect', label: 'Prime Connect', icon: '▶', show: true },
             { href: '/leads', label: 'Leads', icon: '◐', show: true },
             { href: '/customers', label: 'Customers', icon: '◍', show: true },
             { href: '/listings', label: 'Listings', icon: '▣', show: true },

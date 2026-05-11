@@ -54,4 +54,9 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
     // Compliance command center (D6) — recordings queue + refund cases +
     // chargebacks + DNC, all in one tabbed hub.
     Route::get('/compliance', [InertiaPageController::class, 'complianceHub'])->name('compliance.hub');
+
+    // Prime Connect — video calling surface (lobby + active call).
+    // Backend (PrimeConnectRoomController, PrimeConnectAccessTokenController)
+    // already ships on main; this lands the UI surface.
+    Route::get('/prime-connect', [InertiaPageController::class, 'primeConnect'])->name('prime_connect.index');
 });
