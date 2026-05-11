@@ -89,6 +89,7 @@ final class PartnerSiteController extends Controller
                 'has_real_driver' => $this->hasRealDriver($s->slug),
                 'has_webhook_secret' => $s->webhook_secret !== null && $s->webhook_secret !== '',
                 'webhook_inquiry_url' => url('/api/partner-webhooks/'.$s->slug.'/inquiries'),
+                'webhook_booking_url' => url('/api/partner-webhooks/'.$s->slug.'/bookings'),
                 'webhook_last_received_at' => $s->webhook_last_received_at?->toIso8601String(),
                 'created_at' => $s->created_at?->toIso8601String(),
                 'stats' => $row ? [
@@ -152,6 +153,7 @@ final class PartnerSiteController extends Controller
             'has_real_driver' => $this->hasRealDriver($site->slug),
             'has_webhook_secret' => $site->webhook_secret !== null && $site->webhook_secret !== '',
             'webhook_inquiry_url' => url('/api/partner-webhooks/'.$site->slug.'/inquiries'),
+            'webhook_booking_url' => url('/api/partner-webhooks/'.$site->slug.'/bookings'),
             'webhook_last_received_at' => $site->webhook_last_received_at?->toIso8601String(),
             'recent_pushes' => $recent->map(fn ($r) => [
                 'id' => $r->id,
@@ -290,6 +292,7 @@ final class PartnerSiteController extends Controller
             'webhook' => [
                 'secret' => $secret,
                 'inquiry_url' => url('/api/partner-webhooks/'.$site->slug.'/inquiries'),
+                'booking_url' => url('/api/partner-webhooks/'.$site->slug.'/bookings'),
             ],
         ], 201);
     }
@@ -340,6 +343,7 @@ final class PartnerSiteController extends Controller
             'webhook' => [
                 'secret' => $secret,
                 'inquiry_url' => url('/api/partner-webhooks/'.$site->slug.'/inquiries'),
+                'booking_url' => url('/api/partner-webhooks/'.$site->slug.'/bookings'),
             ],
         ]);
     }

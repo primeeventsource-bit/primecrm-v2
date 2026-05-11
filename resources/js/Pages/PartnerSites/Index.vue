@@ -55,6 +55,7 @@ interface Site {
     has_real_driver: boolean;
     has_webhook_secret: boolean;
     webhook_inquiry_url: string;
+    webhook_booking_url: string;
     webhook_last_received_at: string | null;
     created_at: string | null;
     stats: SiteStats;
@@ -99,7 +100,10 @@ async function submitCreate(): Promise<void> {
         if (createForm.value.our_cost_per_listing.trim()) {
             payload.our_cost_per_listing = Number(createForm.value.our_cost_per_listing);
         }
-        const { data } = await axios.post<{ data: Site; webhook: { secret: string; inquiry_url: string } }>(
+        const { data } = await axios.post<{
+            data: Site;
+            webhook: { secret: string; inquiry_url: string; booking_url: string };
+        }>(
             '/api/partner-sites',
             payload,
         );
@@ -110,6 +114,7 @@ async function submitCreate(): Promise<void> {
             siteName: data.data.name,
             secret: data.webhook.secret,
             inquiryUrl: data.webhook.inquiry_url,
+            bookingUrl: data.webhook.booking_url,
         };
         flash.value = { kind: 'ok', msg: `Partner site "${data.data.name}" created.` };
         showCreate.value = false;
@@ -137,6 +142,7 @@ interface SecretReveal {
     siteName: string;
     secret: string;
     inquiryUrl: string;
+    bookingUrl: string;
 }
 const secretReveal = ref<SecretReveal | null>(null);
 const secretCopied = ref(false);
@@ -159,7 +165,9 @@ async function rotateSecret(s: Site): Promise<void> {
     if (!window.confirm(`Rotate the webhook secret for ${s.name}? The old secret will stop working immediately.`)) return;
     rotatingId.value = s.id;
     try {
-        const { data } = await axios.post<{ webhook: { secret: string; inquiry_url: string } }>(
+        const { data } = await axios.post<{
+            webhook: { secret: string; inquiry_url: string; booking_url: string };
+        }>(
             `/api/partner-sites/${s.id}/rotate-secret`,
         );
         secretReveal.value = {
@@ -167,6 +175,7 @@ async function rotateSecret(s: Site): Promise<void> {
             siteName: s.name,
             secret: data.webhook.secret,
             inquiryUrl: data.webhook.inquiry_url,
+            bookingUrl: data.webhook.booking_url,
         };
         flash.value = { kind: 'ok', msg: `Webhook secret rotated for ${s.name}.` };
         await load();
@@ -195,16 +204,19 @@ async function archiveSite(s: Site): Promise<void> {
 /* ──────────────────────────────────────────────────────────────────────
  * COPY HELPERS
  * ──────────────────────────────────────────────────────────────────── */
-const copiedUrlForSite = ref<string | null>(null);
-async function copyWebhookUrl(s: Site): Promise<void> {
+/** Composite key: "<siteId>:<kind>" so each row's two buttons track copy state independently. */
+const copiedUrlKey = ref<string | null>(null);
+async function copyWebhookUrl(s: Site, kind: 'inquiry' | 'booking'): Promise<void> {
+    const url = kind === 'inquiry' ? s.webhook_inquiry_url : s.webhook_booking_url;
+    const key = `${s.id}:${kind}`;
     try {
-        await navigator.clipboard.writeText(s.webhook_inquiry_url);
-        copiedUrlForSite.value = s.id;
+        await navigator.clipboard.writeText(url);
+        copiedUrlKey.value = key;
         window.setTimeout(() => {
-            if (copiedUrlForSite.value === s.id) copiedUrlForSite.value = null;
+            if (copiedUrlKey.value === key) copiedUrlKey.value = null;
         }, 2200);
     } catch {
-        window.prompt('Copy this webhook URL:', s.webhook_inquiry_url);
+        window.prompt('Copy this webhook URL:', url);
     }
 }
 
@@ -344,9 +356,15 @@ function fmtRelative(iso: string | null): string {
                         </div>
                     </div>
                     <div>
-                        <div class="deck-label">Inquiry webhook URL</div>
+                        <div class="deck-label">Inquiry webhook URL <span class="text-deck-dim normal-case">(renter expressed interest)</span></div>
                         <code class="mt-1 block truncate rounded bg-deck-bg/70 px-3 py-2 font-mono text-xs text-deck-soft ring-1 ring-deck-line">
                             {{ secretReveal.inquiryUrl }}
+                        </code>
+                    </div>
+                    <div>
+                        <div class="deck-label">Booking webhook URL <span class="text-deck-dim normal-case">(renter confirmed a stay)</span></div>
+                        <code class="mt-1 block truncate rounded bg-deck-bg/70 px-3 py-2 font-mono text-xs text-deck-soft ring-1 ring-deck-line">
+                            {{ secretReveal.bookingUrl }}
                         </code>
                     </div>
                     <p class="font-mono text-[10px] uppercase tracking-wider text-deck-dim">
@@ -579,30 +597,56 @@ function fmtRelative(iso: string | null): string {
                     </div>
 
                     <!-- Webhook panel — inbound. Always shown so partners can be
-                         pointed at the URL even if no inquiries have arrived yet. -->
+                         pointed at the URLs even if no events have arrived yet.
+                         Two endpoints share the same secret: inquiries (renter
+                         expressed interest) and bookings (renter confirmed). -->
                     <div
                         v-if="editingSiteId !== s.id"
                         class="mt-4 rounded-md border border-deck-line bg-deck-bg/50 p-3"
                     >
                         <div class="flex items-center justify-between gap-2 mb-2">
-                            <div class="deck-label">Inbound webhook</div>
+                            <div class="deck-label">Inbound webhooks</div>
                             <div class="text-[10px] font-mono uppercase tracking-wider text-deck-dim">
                                 last received: <span :class="s.webhook_last_received_at ? 'text-deck-soft' : 'text-deck-dim'">{{ fmtRelative(s.webhook_last_received_at) }}</span>
                             </div>
                         </div>
-                        <div class="flex items-center gap-2">
-                            <code class="flex-1 truncate rounded bg-deck-bg/70 px-2 py-1.5 font-mono text-[11px] text-deck-soft ring-1 ring-deck-line">
-                                {{ s.webhook_inquiry_url }}
-                            </code>
-                            <button
-                                class="btn-ghost text-xs"
-                                title="Copy webhook URL"
-                                @click="copyWebhookUrl(s)"
-                            >
-                                {{ copiedUrlForSite === s.id ? 'Copied ✓' : 'Copy' }}
-                            </button>
+                        <div class="space-y-2">
+                            <div>
+                                <div class="text-[10px] font-mono uppercase tracking-wider text-deck-dim mb-1">
+                                    Inquiry · renter interest
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <code class="flex-1 truncate rounded bg-deck-bg/70 px-2 py-1.5 font-mono text-[11px] text-deck-soft ring-1 ring-deck-line">
+                                        {{ s.webhook_inquiry_url }}
+                                    </code>
+                                    <button
+                                        class="btn-ghost text-xs"
+                                        title="Copy inquiry webhook URL"
+                                        @click="copyWebhookUrl(s, 'inquiry')"
+                                    >
+                                        {{ copiedUrlKey === `${s.id}:inquiry` ? 'Copied ✓' : 'Copy' }}
+                                    </button>
+                                </div>
+                            </div>
+                            <div>
+                                <div class="text-[10px] font-mono uppercase tracking-wider text-deck-dim mb-1">
+                                    Booking · confirmed stay
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <code class="flex-1 truncate rounded bg-deck-bg/70 px-2 py-1.5 font-mono text-[11px] text-deck-soft ring-1 ring-deck-line">
+                                        {{ s.webhook_booking_url }}
+                                    </code>
+                                    <button
+                                        class="btn-ghost text-xs"
+                                        title="Copy booking webhook URL"
+                                        @click="copyWebhookUrl(s, 'booking')"
+                                    >
+                                        {{ copiedUrlKey === `${s.id}:booking` ? 'Copied ✓' : 'Copy' }}
+                                    </button>
+                                </div>
+                            </div>
                         </div>
-                        <div class="mt-2 flex items-center justify-between gap-2">
+                        <div class="mt-3 flex items-center justify-between gap-2 border-t border-deck-line pt-2">
                             <span class="text-[11px] text-deck-dim">
                                 Secret status:
                                 <span :class="s.has_webhook_secret ? 'text-floor-win' : 'text-floor-lose'">

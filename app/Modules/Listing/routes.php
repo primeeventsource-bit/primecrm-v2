@@ -97,4 +97,7 @@ Route::prefix('/partner-webhooks')->group(function (): void {
     Route::post('/{slug}/inquiries', [PartnerWebhookController::class, 'inquiry'])
         ->where('slug', '[a-z0-9][a-z0-9-]*[a-z0-9]')
         ->name('api.partner_webhooks.inquiry');
+    Route::post('/{slug}/bookings', [PartnerWebhookController::class, 'booking'])
+        ->where('slug', '[a-z0-9][a-z0-9-]*[a-z0-9]')
+        ->name('api.partner_webhooks.booking');
 });

@@ -65,6 +65,10 @@ final class Booking extends Model
         'our_commission',
         'owner_notified_at',
         'payment_status',
+        // Partner-webhook origin (added via add_partner_booking_to_bookings).
+        'partner_site_id',
+        'external_booking_id',
+        'partner_metadata',
     ];
 
     protected function casts(): array
@@ -81,6 +85,8 @@ final class Booking extends Model
             'owner_payout' => 'decimal:2',
             'our_commission' => 'decimal:2',
             'owner_notified_at' => 'datetime',
+            // Partner-webhook origin
+            'partner_metadata' => 'array',
         ];
     }
 
