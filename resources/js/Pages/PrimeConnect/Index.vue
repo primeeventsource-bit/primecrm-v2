@@ -25,10 +25,15 @@
  * UI doesn't move.
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { usePage } from '@inertiajs/vue3';
 import AppLayout from '@/Layouts/AppLayout.vue';
 import Lobby from '@/Components/PrimeConnect/Lobby.vue';
 import ActiveCall from '@/Components/PrimeConnect/ActiveCall.vue';
 import { usePrimeConnectCall, type CallIntent } from '@/Composables/usePrimeConnectCall';
+import type { PageProps } from '@/types/api';
+
+const page = usePage<PageProps>();
+const tenantId = computed(() => page.props.auth.user?.tenant_id ?? '');
 
 /* The page owns one call. The composable bundles useTwilioBridge plus
  * the call lifecycle (POST /rooms → mint token → Video.connect →
@@ -291,7 +296,9 @@ watch(
                 <Lobby
                     :tab="tab"
                     :now-ms="nowMs"
+                    :tenant-id="tenantId"
                     @start="startCall"
+                    @join="(intent) => joinExistingCall(intent.roomName, intent.roomId)"
                     @counts="onCountsUpdate"
                 />
             </div>

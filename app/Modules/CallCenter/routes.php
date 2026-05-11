@@ -52,6 +52,10 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
             Route::post('/', [PrimeConnectRoomController::class, 'store']);
             Route::get('/{id}', [PrimeConnectRoomController::class, 'show']);
             Route::delete('/{id}', [PrimeConnectRoomController::class, 'destroy']);
+            // War-room flag — agent flips this from the in-call UI to
+            // signal supervisors that they want backup; supervisors can
+            // also unflip from the war room view.
+            Route::post('/{id}/flag', [PrimeConnectRoomController::class, 'flag']);
         });
     });
 });

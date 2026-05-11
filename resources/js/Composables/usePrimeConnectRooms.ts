@@ -29,6 +29,11 @@ export interface PrimeConnectRoom {
     medium: 'voice' | 'video' | null;
     agent_id: string | null;
     lead_id: string | null;
+    /** Eager-loaded from the backend resource. Null when relation absent. */
+    lead_name?: string | null;
+    agent_name?: string | null;
+    /** war-room flag — closer requested supervisor attention. */
+    flagged: boolean;
     scheduled_for: string | null;
     initiated_at: string | null;
     ended_at: string | null;

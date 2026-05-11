@@ -26,12 +26,15 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { avatarTone, initials, moneyShort, shortClock, shortDuration } from '@/Components/Supervisor/helpers';
 import WarRoomIcon from '@/Components/Supervisor/WarRoomIcon.vue';
+import { usePrimeConnectRooms } from '@/Composables/usePrimeConnectRooms';
 
 type LobbyTab = 'active' | 'scheduled' | 'history' | 'recordings';
 
 const props = defineProps<{
     tab: LobbyTab;
     nowMs: number;
+    /** Tenant id from the page shell — drives the Echo channel for room updates. */
+    tenantId: string;
 }>();
 
 interface CallIntent {
@@ -40,8 +43,14 @@ interface CallIntent {
     scheduledCallId: string | null;
 }
 
+interface JoinIntent {
+    roomName: string;
+    roomId: string;
+}
+
 const emit = defineEmits<{
     (e: 'start', intent: CallIntent): void;
+    (e: 'join', intent: JoinIntent): void;
     (e: 'counts', counts: Record<LobbyTab, number>): void;
 }>();
 
@@ -213,6 +222,8 @@ interface ActiveSession {
     agentName: string;
     startedAt: string;
     flagged: boolean;          // war-room mode toggled on by the closer
+    /** Twilio room name — required for the Join button's invite path. */
+    roomName: string;
 }
 interface ScheduledCall {
     id: string;
@@ -239,26 +250,31 @@ interface RecordingRow {
     sizeMb: number;
 }
 
-// Seeded so the page is not empty while wiring is pending. Swap each
-// of these blocks for axios.get('/api/...') in the order listed.
-const activeSessions = ref<ActiveSession[]>([
-    {
-        id: 'sess-1',
-        leadId: 'lead-44a',
-        leadName: 'Marcus Patel',
-        agentName: 'Jenna Ortiz',
-        startedAt: new Date(Date.now() - 3 * 60 * 1000).toISOString(),
-        flagged: false,
-    },
-    {
-        id: 'sess-2',
-        leadId: 'lead-71b',
-        leadName: 'Anita Cole',
-        agentName: 'David Reyes',
-        startedAt: new Date(Date.now() - 11 * 60 * 1000).toISOString(),
-        flagged: true,
-    },
-]);
+// Active sessions are now backed by /api/prime-connect/rooms with
+// Echo updates on the supervisor channel (room.created / room.ended).
+// The composable handles initial fetch + live append/drop; we map the
+// API shape into the ActiveSession the template expects so the
+// template changes stay surgical.
+const { rooms: liveRooms } = usePrimeConnectRooms(props.tenantId, { activeOnly: true });
+
+const activeSessions = computed<ActiveSession[]>(() =>
+    liveRooms.value.map((r) => ({
+        id: r.id,
+        leadId: r.lead_id ?? r.id,
+        leadName: r.lead_name ?? 'Unknown lead',
+        agentName: r.agent_name ?? 'Agent',
+        startedAt: r.initiated_at ?? r.created_at ?? new Date().toISOString(),
+        flagged: r.flagged,
+        // Carry the room name forward for the Join button — the
+        // ActiveSession type was extended below for this.
+        roomName: r.room_name ?? '',
+    })),
+);
+
+function joinSession(s: ActiveSession): void {
+    if (! s.roomName) return;
+    emit('join', { roomName: s.roomName, roomId: s.id });
+}
 
 const scheduled = ref<ScheduledCall[]>([
     {
@@ -552,28 +568,34 @@ function relativeFuture(iso: string): string {
                                     </span>
                                 </div>
                             </div>
-                            <!-- Supervisor controls — same affordances as the war room -->
+                            <!-- Row actions. Listen/Whisper are supervisor
+                                 affordances kept for visual parity with
+                                 the war room (wire-up TBD). Join is the
+                                 working action — drops the user into the
+                                 same Twilio room as the agent. -->
                             <div class="flex items-center gap-1">
                                 <button
                                     type="button"
                                     class="rounded p-1.5 text-sky-300 ring-1 ring-sky-500/30 hover:bg-sky-500/10"
-                                    title="Listen silently"
+                                    title="Listen silently (supervisor)"
                                 >
                                     <WarRoomIcon name="headphones" class="h-3.5 w-3.5" />
                                 </button>
                                 <button
                                     type="button"
                                     class="rounded p-1.5 text-amber-300 ring-1 ring-amber-500/30 hover:bg-amber-500/10"
-                                    title="Whisper to agent"
+                                    title="Whisper to agent (supervisor)"
                                 >
                                     <WarRoomIcon name="whisper" class="h-3.5 w-3.5" />
                                 </button>
                                 <button
                                     type="button"
-                                    class="rounded p-1.5 text-rose-300 ring-1 ring-rose-500/30 hover:bg-rose-500/10"
-                                    title="Join the call"
+                                    class="btn-primary text-xs"
+                                    :disabled="!s.roomName"
+                                    :title="s.roomName ? 'Join this room' : 'Room not ready'"
+                                    @click="joinSession(s)"
                                 >
-                                    <WarRoomIcon name="barge" class="h-3.5 w-3.5" />
+                                    Join
                                 </button>
                             </div>
                         </li>

@@ -43,7 +43,11 @@ final class PrimeConnectRoomController extends Controller
             'per_page' => ['nullable', 'integer', 'min:1', 'max:200'],
         ]);
 
-        $query = Call::query()->video()->with('participants');
+        // Eager-load lead + agent so PrimeConnectRoomResource can include
+        // lead_name / agent_name without N+1 queries. We only need the
+        // name columns; selecting the full row keeps the model hydrated
+        // for the resource's whenLoaded() check.
+        $query = Call::query()->video()->with(['participants', 'lead', 'agent']);
 
         if ($request->filled('room_status')) {
             $query->where('room_status', $request->string('room_status')->value());
@@ -66,9 +70,58 @@ final class PrimeConnectRoomController extends Controller
 
     public function show(string $id): PrimeConnectRoomResource
     {
-        $call = Call::query()->video()->with('participants')->findOrFail($id);
+        $call = Call::query()->video()
+            ->with(['participants', 'lead', 'agent'])
+            ->findOrFail($id);
 
         return new PrimeConnectRoomResource($call);
+    }
+
+    /**
+     * Toggle the war-room flag on a room. The agent flips this from the
+     * in-call UI when they want a supervisor's eyes on a call going
+     * sideways without breaking flow to message anyone. The flag rides
+     * inside lobby_metadata['war_room_flag'] (existing JSON column) so
+     * we don't need a schema change for a boolean.
+     *
+     * Only the agent who owns the room or a supervisor can flip it.
+     *   POST /api/prime-connect/rooms/{id}/flag { flagged: true|false }
+     */
+    public function flag(Request $request, string $id): JsonResponse
+    {
+        $request->validate([
+            'flagged' => ['required', 'boolean'],
+        ]);
+
+        $call = Call::query()->video()->findOrFail($id);
+
+        $user = $request->user();
+        $isOwner = $user !== null && $user->id === $call->agent_id;
+        $isSupervisor = $user?->role?->canSupervise() ?? false;
+        if (! $isOwner && ! $isSupervisor) {
+            return response()->json(['message' => 'Forbidden.'], 403);
+        }
+
+        // Merge into existing lobby_metadata rather than overwriting —
+        // CreateInstantRoomAction may have stored other keys (device
+        // ids, initial mute state, etc.) that we don't want to drop.
+        $metadata = is_array($call->lobby_metadata) ? $call->lobby_metadata : [];
+        $metadata['war_room_flag'] = $request->boolean('flagged');
+        if ($request->boolean('flagged')) {
+            $metadata['war_room_flagged_at'] = now()->toIso8601String();
+            $metadata['war_room_flagged_by'] = $user?->id;
+        } else {
+            // Clearing the flag — leave the timestamps for the audit
+            // trail; the boolean is the source of truth for live UI.
+            unset($metadata['war_room_flag']);
+        }
+        $call->lobby_metadata = $metadata;
+        $call->save();
+
+        return response()->json([
+            'ok' => true,
+            'flagged' => $request->boolean('flagged'),
+        ]);
     }
 
     public function store(CreateInstantRoomRequest $request): JsonResponse

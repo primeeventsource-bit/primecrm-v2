@@ -59,6 +59,7 @@
  *      `prompts`. The shape (kind/headline/detail) already matches.
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import axios from 'axios';
 import WarRoomIcon from '@/Components/Supervisor/WarRoomIcon.vue';
 import { useCallTimer } from '@/Composables/useCallTimer';
 import type { useTwilioBridge } from '@/Composables/useTwilioBridge';
@@ -293,10 +294,39 @@ function toggleDrawer(d: Exclude<Drawer, null>): void {
 /* ──────────────────────────────────────────────────────────────────────
  * War-room mode. When the closer flips this on, the call appears in the
  * supervisor war room with a flag — they can come help without the
- * closer breaking eye contact to message anyone. Placeholder; the wire
- * is `axios.post('/api/calls/{id}/flag')`.
+ * closer breaking eye contact to message anyone.
+ *
+ * Wire: POST /api/prime-connect/rooms/{id}/flag { flagged: bool }. The
+ * UI flips optimistically so the button feels instant; if the request
+ * fails we roll back and surface the error via the existing lastError
+ * channel (the bridge already exposes one).
+ *
+ * Disabled when we don't have a roomId — e.g. the invitee path where
+ * we joined someone else's room. Only the room owner can flag their
+ * own call, which lines up with the server-side permission check.
  * ──────────────────────────────────────────────────────────────────── */
 const warRoomMode = ref(false);
+const warRoomBusy = ref(false);
+const canFlagWarRoom = computed(() => !!props.roomId && props.roomId !== '');
+
+async function toggleWarRoom(): Promise<void> {
+    if (!canFlagWarRoom.value || warRoomBusy.value) return;
+    const next = !warRoomMode.value;
+    // Optimistic flip — the button doesn't feel chatty if the request
+    // takes 200ms to round-trip. Rollback on failure.
+    warRoomMode.value = next;
+    warRoomBusy.value = true;
+    try {
+        await axios.post(
+            `/api/prime-connect/rooms/${props.roomId}/flag`,
+            { flagged: next },
+        );
+    } catch {
+        warRoomMode.value = !next; // rollback
+    } finally {
+        warRoomBusy.value = false;
+    }
+}
 
 /* ──────────────────────────────────────────────────────────────────────
  * Connection quality — derived from Twilio's NetworkQualityLevel
@@ -733,14 +763,17 @@ const customerLabel = computed(() => props.intent?.leadName ?? 'Connecting…');
                 <!-- War-room toggle — flagged calls bubble up to supervisors -->
                 <button
                     type="button"
-                    class="flex h-10 items-center gap-1.5 rounded-full px-3 text-[11px] font-semibold uppercase tracking-wider transition-colors"
+                    class="flex h-10 items-center gap-1.5 rounded-full px-3 text-[11px] font-semibold uppercase tracking-wider transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                     :class="warRoomMode
                         ? 'bg-rose-500/85 text-white animate-pulse-call'
                         : 'bg-white/5 text-white/80 hover:bg-white/15'"
-                    :title="warRoomMode
-                        ? 'War room flag is ON — supervisors notified'
-                        : 'Flag this call for supervisor backup'"
-                    @click="warRoomMode = !warRoomMode"
+                    :disabled="!canFlagWarRoom || warRoomBusy"
+                    :title="!canFlagWarRoom
+                        ? 'War room flag is only available to the room owner'
+                        : warRoomMode
+                            ? 'War room flag is ON — supervisors notified'
+                            : 'Flag this call for supervisor backup'"
+                    @click="toggleWarRoom"
                 >
                     <WarRoomIcon name="alert" class="h-3.5 w-3.5" />
                     War room
