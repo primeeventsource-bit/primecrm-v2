@@ -47,4 +47,7 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
     Route::get('/supervisor/war-room', [InertiaPageController::class, 'warRoom'])->name('supervisor.war_room');
     Route::get('/compliance/dnc', [InertiaPageController::class, 'complianceDnc'])->name('compliance.dnc');
     Route::get('/partner-sites', [InertiaPageController::class, 'partnerSites'])->name('partner_sites.index');
+
+    // Renter-side bookings ledger (D5).
+    Route::get('/bookings', [InertiaPageController::class, 'bookingsLedger'])->name('bookings.ledger');
 });

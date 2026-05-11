@@ -6,6 +6,8 @@ use App\Modules\Listing\Http\Controllers\ListingController;
 use App\Modules\Listing\Http\Controllers\ListingDistributionController;
 use App\Modules\Listing\Http\Controllers\OwnerController;
 use App\Modules\Listing\Http\Controllers\PartnerSiteController;
+use App\Modules\Listing\Http\Controllers\RentalBookingController;
+use App\Modules\Listing\Http\Controllers\RentalInquiryController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -55,4 +57,18 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
     Route::patch('/partner-sites/{id}', [PartnerSiteController::class, 'update'])
         ->whereUuid('id')
         ->name('api.partner_sites.update');
+
+    // Renter inquiry actions (D5).
+    Route::prefix('/rental-inquiries/{id}')->whereUuid('id')->group(function (): void {
+        Route::post('/respond', [RentalInquiryController::class, 'respond'])
+            ->name('api.rental_inquiries.respond');
+        Route::post('/mark-lost', [RentalInquiryController::class, 'markLost'])
+            ->name('api.rental_inquiries.mark_lost');
+        Route::post('/book', [RentalInquiryController::class, 'book'])
+            ->name('api.rental_inquiries.book');
+    });
+
+    // Renter-side bookings ledger (the success-metric view).
+    Route::get('/rental-bookings', [RentalBookingController::class, 'index'])
+        ->name('api.rental_bookings.index');
 });

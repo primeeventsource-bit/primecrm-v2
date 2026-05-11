@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue';
 import axios from 'axios';
 import { Link } from '@inertiajs/vue3';
 import AppLayout from '@/Layouts/AppLayout.vue';
+import Modal from '@/Components/Modal.vue';
 
 /**
  * Listing detail — the operational view of one marketed offering.
@@ -206,6 +207,113 @@ const pickableSites = computed(() => {
     const already = new Set(detail.value.partner_sites.map((p) => p.partner_site_id));
     return allSites.value.filter((s) => !already.has(s.id));
 });
+
+/* ------------------------------------------------------------------
+ | Inquiry workflow (D5)
+ |------------------------------------------------------------------ */
+
+type InquiryMode = 'respond' | 'book';
+
+const inquiryModalOpen = ref(false);
+const inquiryMode = ref<InquiryMode>('respond');
+const activeInquiry = ref<Inquiry | null>(null);
+const respondMessage = ref('');
+const respondAmount = ref<number | null>(null);
+const bookForm = ref({
+    check_in_date: '' as string,
+    check_out_date: '' as string,
+    total_price: 0 as number,
+    renter_name: '' as string,
+    renter_email: '' as string,
+    renter_phone: '' as string,
+});
+const inquiryBusy = ref(false);
+
+function openRespondModal(iq: Inquiry): void {
+    activeInquiry.value = iq;
+    inquiryMode.value = 'respond';
+    respondMessage.value = '';
+    respondAmount.value = iq.offered_amount;
+    inquiryModalOpen.value = true;
+}
+
+function openBookModal(iq: Inquiry): void {
+    if (!detail.value) return;
+    activeInquiry.value = iq;
+    inquiryMode.value = 'book';
+    bookForm.value = {
+        check_in_date: iq.requested_check_in ?? detail.value.check_in_date,
+        check_out_date: iq.requested_check_out ?? detail.value.check_out_date,
+        total_price: iq.offered_amount ?? detail.value.asking_price,
+        renter_name: iq.renter_name,
+        renter_email: iq.renter_email ?? '',
+        renter_phone: iq.renter_phone ?? '',
+    };
+    inquiryModalOpen.value = true;
+}
+
+async function submitRespond(): Promise<void> {
+    if (!activeInquiry.value) return;
+    inquiryBusy.value = true;
+    flash.value = null;
+    try {
+        const { data } = await axios.post<{ message: string }>(
+            `/api/rental-inquiries/${activeInquiry.value.id}/respond`,
+            {
+                message: respondMessage.value,
+                offered_amount: respondAmount.value || null,
+            },
+        );
+        flash.value = { kind: 'ok', msg: data.message };
+        inquiryModalOpen.value = false;
+        await load();
+    } catch (e: unknown) {
+        const msg = (e as { response?: { data?: { message?: string } } }).response?.data?.message;
+        flash.value = { kind: 'err', msg: msg ?? 'Could not send response.' };
+    } finally {
+        inquiryBusy.value = false;
+        window.setTimeout(() => (flash.value = null), 4000);
+    }
+}
+
+async function submitBook(): Promise<void> {
+    if (!activeInquiry.value) return;
+    inquiryBusy.value = true;
+    flash.value = null;
+    try {
+        const { data } = await axios.post<{ message: string }>(
+            `/api/rental-inquiries/${activeInquiry.value.id}/book`,
+            bookForm.value,
+        );
+        flash.value = { kind: 'ok', msg: data.message };
+        inquiryModalOpen.value = false;
+        await load();
+    } catch (e: unknown) {
+        const msg = (e as { response?: { data?: { message?: string } } }).response?.data?.message;
+        flash.value = { kind: 'err', msg: msg ?? 'Could not create booking.' };
+    } finally {
+        inquiryBusy.value = false;
+        window.setTimeout(() => (flash.value = null), 4000);
+    }
+}
+
+async function markInquiryLost(id: string): Promise<void> {
+    inquiryBusy.value = true;
+    flash.value = null;
+    try {
+        const { data } = await axios.post<{ message: string }>(
+            `/api/rental-inquiries/${id}/mark-lost`,
+        );
+        flash.value = { kind: 'ok', msg: data.message };
+        await load();
+    } catch (e: unknown) {
+        const msg = (e as { response?: { data?: { message?: string } } }).response?.data?.message;
+        flash.value = { kind: 'err', msg: msg ?? 'Could not mark lost.' };
+    } finally {
+        inquiryBusy.value = false;
+        window.setTimeout(() => (flash.value = null), 4000);
+    }
+}
 
 onMounted(load);
 
@@ -545,9 +653,22 @@ function activityColor(kind: string): string {
                                                 <span v-if="iq.handler_name"> · handled by {{ iq.handler_name }}</span>
                                             </div>
                                         </div>
-                                        <div class="flex flex-col gap-1.5">
-                                            <button class="btn-ghost text-xs" disabled title="Coming in D5">Respond</button>
-                                            <button class="btn-ghost text-xs" disabled title="Coming in D5">Mark lost</button>
+                                        <div class="flex flex-col gap-1.5 shrink-0">
+                                            <button
+                                                class="btn-ghost text-xs"
+                                                :disabled="inquiryBusy || iq.status === 'booked' || iq.status === 'lost'"
+                                                @click="openRespondModal(iq)"
+                                            >Respond</button>
+                                            <button
+                                                class="btn-primary text-xs"
+                                                :disabled="inquiryBusy || iq.status === 'booked' || iq.status === 'lost'"
+                                                @click="openBookModal(iq)"
+                                            >Book</button>
+                                            <button
+                                                class="text-xs text-deck-soft hover:text-floor-lose disabled:opacity-40"
+                                                :disabled="inquiryBusy || iq.status === 'booked' || iq.status === 'lost'"
+                                                @click="markInquiryLost(iq.id)"
+                                            >Mark lost</button>
                                         </div>
                                     </div>
                                 </li>
@@ -652,6 +773,86 @@ function activityColor(kind: string): string {
                     </div>
                 </div>
             </template>
+
+            <!-- Inquiry action modal (Respond / Book) -->
+            <Modal
+                :open="inquiryModalOpen"
+                :title="inquiryMode === 'respond' ? `Respond to ${activeInquiry?.renter_name ?? 'inquiry'}` : `Book ${activeInquiry?.renter_name ?? 'renter'}`"
+                @close="inquiryModalOpen = false"
+            >
+                <!-- Respond -->
+                <form v-if="inquiryMode === 'respond' && activeInquiry" @submit.prevent="submitRespond" class="space-y-4">
+                    <div>
+                        <label class="label">Message</label>
+                        <textarea
+                            v-model="respondMessage"
+                            rows="4"
+                            required
+                            :placeholder="`Hi ${activeInquiry.renter_name}, thanks for reaching out…`"
+                            class="input mt-1"
+                        ></textarea>
+                    </div>
+                    <div>
+                        <label class="label">Counter-offer amount (optional)</label>
+                        <input
+                            v-model.number="respondAmount"
+                            type="number" min="0" step="0.01"
+                            placeholder="Leave blank for plain response"
+                            class="input mt-1"
+                        />
+                        <p class="text-[10px] font-mono uppercase tracking-wider text-deck-dim mt-1">
+                            Sending an amount moves the inquiry into negotiating; blank keeps it as responded.
+                        </p>
+                    </div>
+                    <div class="flex justify-end gap-2 pt-2 border-t border-deck-line">
+                        <button type="button" class="btn-ghost text-xs" :disabled="inquiryBusy" @click="inquiryModalOpen = false">Cancel</button>
+                        <button type="submit" class="btn-primary text-xs" :disabled="inquiryBusy || !respondMessage">
+                            {{ inquiryBusy ? 'Sending…' : 'Send response' }}
+                        </button>
+                    </div>
+                </form>
+
+                <!-- Book -->
+                <form v-else-if="inquiryMode === 'book' && activeInquiry" @submit.prevent="submitBook" class="space-y-4">
+                    <p class="text-sm text-deck-soft">
+                        Confirming this booking creates a rental, links it to this inquiry, sets the listing to <strong>booked</strong>, and dispatches owner notification.
+                    </p>
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label class="label">Check-in</label>
+                            <input v-model="bookForm.check_in_date" type="date" required class="input mt-1 text-sm" />
+                        </div>
+                        <div>
+                            <label class="label">Check-out</label>
+                            <input v-model="bookForm.check_out_date" type="date" required class="input mt-1 text-sm" />
+                        </div>
+                    </div>
+                    <div>
+                        <label class="label">Total rental amount (USD)</label>
+                        <input v-model.number="bookForm.total_price" type="number" min="0" step="0.01" required class="input mt-1" />
+                    </div>
+                    <div>
+                        <label class="label">Renter name</label>
+                        <input v-model="bookForm.renter_name" type="text" required class="input mt-1 text-sm" />
+                    </div>
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label class="label">Renter email</label>
+                            <input v-model="bookForm.renter_email" type="email" class="input mt-1 text-sm" />
+                        </div>
+                        <div>
+                            <label class="label">Renter phone</label>
+                            <input v-model="bookForm.renter_phone" type="tel" class="input mt-1 text-sm" />
+                        </div>
+                    </div>
+                    <div class="flex justify-end gap-2 pt-2 border-t border-deck-line">
+                        <button type="button" class="btn-ghost text-xs" :disabled="inquiryBusy" @click="inquiryModalOpen = false">Cancel</button>
+                        <button type="submit" class="btn-primary text-xs" :disabled="inquiryBusy || !bookForm.renter_name || bookForm.total_price <= 0">
+                            {{ inquiryBusy ? 'Booking…' : 'Confirm booking' }}
+                        </button>
+                    </div>
+                </form>
+            </Modal>
         </div>
     </AppLayout>
 </template>

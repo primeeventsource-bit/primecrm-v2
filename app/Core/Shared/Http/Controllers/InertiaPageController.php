@@ -140,4 +140,11 @@ final class InertiaPageController extends Controller
 
         return Inertia::render('PartnerSites/Index');
     }
+
+    public function bookingsLedger(): Response
+    {
+        // Renter-side bookings ledger — confirmed rentals across all
+        // listings. The success-metric view (D5).
+        return Inertia::render('Bookings/Index');
+    }
 }
