@@ -219,11 +219,18 @@ onBeforeUnmount(() => {
  * ──────────────────────────────────────────────────────────────────── */
 const muted = computed(() => props.bridge.isAudioMuted.value);
 const cameraOn = computed(() => !props.bridge.isVideoOff.value);
-const sharing = ref(false);
+const sharing = computed(() => props.bridge.isScreenSharing.value);
+/** Twilio fires recording-started/stopped from the room; falls back to
+ *  the always-on TCPA badge when the recording state is unknown
+ *  (briefly during connect). The badge text differentiates so the
+ *  agent can never be confused about whether they're on the record. */
+const recording = computed(() => props.bridge.isRecording.value);
 
 function onToggleMute(): void { props.bridge.toggleAudio(); }
 function onToggleCamera(): void { props.bridge.toggleVideo(); }
-function onToggleShare(): void { sharing.value = !sharing.value; /* TODO: getDisplayMedia */ }
+async function onToggleShare(): Promise<void> {
+    try { await props.bridge.toggleScreenShare(); } catch { /* surfaced via lastError */ }
+}
 
 /* ──────────────────────────────────────────────────────────────────────
  * Invite link — drops a `?join=<room>&roomId=<id>` URL in clipboard.
@@ -452,11 +459,30 @@ const customerLabel = computed(() => props.intent?.leadName ?? 'Connecting…');
                  audible even when the speaker isn't on the main canvas. -->
             <div ref="remoteAudioMount" class="hidden" aria-hidden="true"></div>
 
-            <!-- Recording badge — top-left, ugly-on-purpose, always visible -->
-            <div class="absolute left-4 top-4 flex items-center gap-2 rounded-md bg-rose-600/90 px-2.5 py-1 ring-2 ring-rose-300/40">
-                <span class="h-2 w-2 rounded-full bg-white animate-pulse"></span>
-                <span class="font-mono text-[11px] font-bold uppercase tracking-[0.18em]">REC</span>
-                <span class="font-mono tabular-nums text-[11px] text-white/90">{{ elapsedLabel }}</span>
+            <!-- Recording badge — top-left, ugly-on-purpose, always visible.
+                 TCPA disclosure: the agent must always know whether the
+                 room is on the record. Two visual states:
+                   • recording=true  → red, pulsing dot, "REC mm:ss"
+                   • recording=false → amber, no dot, "REC PAUSED"
+                 Both are intentionally loud — there is no "off" state for
+                 this badge; the room being un-recorded is itself news. -->
+            <div
+                class="absolute left-4 top-4 flex items-center gap-2 rounded-md px-2.5 py-1 ring-2"
+                :class="recording
+                    ? 'bg-rose-600/90 ring-rose-300/40'
+                    : 'bg-amber-500/90 ring-amber-200/50 text-deck-bg'"
+            >
+                <span
+                    v-if="recording"
+                    class="h-2 w-2 rounded-full bg-white animate-pulse"
+                ></span>
+                <span class="font-mono text-[11px] font-bold uppercase tracking-[0.18em]">
+                    {{ recording ? 'REC' : 'REC PAUSED' }}
+                </span>
+                <span
+                    v-if="recording"
+                    class="font-mono tabular-nums text-[11px] text-white/90"
+                >{{ elapsedLabel }}</span>
             </div>
 
             <!-- Connection quality — top-right -->
@@ -660,7 +686,7 @@ const customerLabel = computed(() => props.intent?.leadName ?? 'Connecting…');
                     :class="sharing
                         ? 'bg-floor-accent/85 text-deck-bg hover:bg-floor-accentHi'
                         : 'bg-white/5 text-white/80 hover:bg-white/15'"
-                    :title="sharing ? 'Stop sharing (coming soon)' : 'Share screen (coming soon)'"
+                    :title="sharing ? 'Stop screen sharing' : 'Share screen'"
                     @click="onToggleShare"
                 >
                     <WarRoomIcon name="broadcast" class="h-4 w-4" />

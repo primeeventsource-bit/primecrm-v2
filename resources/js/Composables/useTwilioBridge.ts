@@ -139,6 +139,23 @@ export function useTwilioBridge() {
     const isAudioMuted = ref(false);
     const isVideoOff = ref(false);
 
+    // Screen share state. The screen-share approach is track-swap:
+    // when sharing starts we unpublish the camera track and publish
+    // a screen track in its place; when sharing stops we reverse.
+    // This keeps the bridge's "one video track per participant" model
+    // (which the receiver renders without modification) while still
+    // letting the screen replace the face on the main canvas remotely.
+    const isScreenSharing = ref(false);
+    const localScreenTrack = shallowRef<LocalVideoTrack | null>(null);
+    // Stash the camera track while we're screen-sharing so we can
+    // re-publish it cleanly when the user stops.
+    const cameraTrackStash = shallowRef<LocalVideoTrack | null>(null);
+
+    // Recording state — driven by Room.recordingStarted / recordingStopped
+    // events. Twilio fires these when the room's recording status
+    // changes server-side (e.g., a supervisor toggles recording).
+    const isRecording = ref(false);
+
     /* --------------------------------------------------------------
      * Public API
      * -------------------------------------------------------------- */
@@ -251,6 +268,114 @@ export function useTwilioBridge() {
         return isVideoOff.value;
     }
 
+    /**
+     * Toggle screen share. On start we replace the camera track with a
+     * fresh screen-capture track; on stop we replace it back. Throws
+     * (via the surrounding state machine) if the user dismisses the
+     * browser's screen-picker dialog — caller catches via lastError.
+     *
+     * Browser-initiated stop (the "Stop sharing" overlay at the top of
+     * the page) fires `ended` on the underlying MediaStreamTrack; we
+     * subscribe and reverse the swap automatically so the agent
+     * doesn't end up off-camera silently.
+     */
+    async function toggleScreenShare(): Promise<boolean> {
+        const r = room.value;
+        if (!r) return isScreenSharing.value;
+
+        const Video = await import('twilio-video');
+
+        // ───── Start sharing ─────
+        if (! isScreenSharing.value) {
+            let displayStream: MediaStream;
+            try {
+                displayStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: { frameRate: 15 },
+                    audio: false, // system audio rarely useful; saves bandwidth + permission friction
+                });
+            } catch {
+                // User cancelled the picker or denied permission — no-op.
+                return false;
+            }
+
+            const screenMediaTrack = displayStream.getVideoTracks()[0];
+            if (! screenMediaTrack) return false;
+
+            // Wrap the MediaStreamTrack in a Twilio LocalVideoTrack so
+            // we can use the participant.publishTrack flow uniformly.
+            const screenTrack = new Video.LocalVideoTrack(screenMediaTrack, {
+                name: 'screen',
+            });
+
+            // Stash + unpublish the camera track. The bridge's
+            // localVideoTrack ref points at whatever's currently
+            // published so the self-view reflects what remotes see.
+            const camera = localVideoTrack.value;
+            if (camera) {
+                try { r.localParticipant.unpublishTrack(camera); } catch { /* */ }
+                cameraTrackStash.value = camera;
+            }
+
+            // Publish the screen track. Remote participants get a
+            // trackSubscribed event and the bridge's existing handler
+            // attaches it to their main canvas.
+            try {
+                await r.localParticipant.publishTrack(screenTrack);
+            } catch (e) {
+                lastError.value = errorMessage(e);
+                // Couldn't publish — release the captured stream so the
+                // browser's screen-share indicator goes away.
+                try { screenTrack.stop(); } catch { /* */ }
+                screenMediaTrack.stop();
+                // Re-publish camera since we already unpublished it.
+                if (camera) {
+                    try { await r.localParticipant.publishTrack(camera); } catch { /* */ }
+                    cameraTrackStash.value = null;
+                }
+                return false;
+            }
+
+            // Browser-initiated stop ("Stop sharing" overlay).
+            screenMediaTrack.addEventListener('ended', () => {
+                // Re-entrant call into ourselves to reverse the swap.
+                // Guard so we don't double-stop if the user clicked
+                // our button at the same time as the browser's.
+                if (isScreenSharing.value) void toggleScreenShare();
+            });
+
+            localScreenTrack.value = screenTrack;
+            localVideoTrack.value = screenTrack; // self-view + remote both show screen
+            isScreenSharing.value = true;
+            return true;
+        }
+
+        // ───── Stop sharing ─────
+        const screen = localScreenTrack.value;
+        if (screen) {
+            try { r.localParticipant.unpublishTrack(screen); } catch { /* */ }
+            try { screen.stop(); } catch { /* */ }
+            // detach DOM elements the consumer attached via attach()
+            try { screen.detach().forEach((el) => el.remove()); } catch { /* */ }
+        }
+        localScreenTrack.value = null;
+
+        const camera = cameraTrackStash.value;
+        if (camera) {
+            try {
+                await r.localParticipant.publishTrack(camera);
+                localVideoTrack.value = camera;
+            } catch (e) {
+                lastError.value = errorMessage(e);
+                localVideoTrack.value = null;
+            }
+        } else {
+            localVideoTrack.value = null;
+        }
+        cameraTrackStash.value = null;
+        isScreenSharing.value = false;
+        return false;
+    }
+
     /* --------------------------------------------------------------
      * Internals
      * -------------------------------------------------------------- */
@@ -279,8 +404,19 @@ export function useTwilioBridge() {
             state.value = 'disconnected';
             cleanupLocalTracks();
             remoteParticipants.value = new Map();
+            isRecording.value = false;
             room.value = null;
         });
+
+        // Recording lifecycle — Twilio fires these when the room's
+        // recording status changes server-side. The default behavior
+        // for rooms created by our backend is "always recording" once
+        // a participant joins, but a supervisor can pause/resume via
+        // the REST API; the UI must reflect that immediately so the
+        // TCPA disclosure indicator is never a lie.
+        if (r.isRecording) isRecording.value = true;
+        r.on('recordingStarted', () => { isRecording.value = true; });
+        r.on('recordingStopped', () => { isRecording.value = false; });
 
         // Local network quality — drives the connection-quality pill.
         r.localParticipant.on('networkQualityLevelChanged', (level: number) => {
@@ -346,16 +482,22 @@ export function useTwilioBridge() {
     function cleanupLocalTracks(): void {
         const a = localAudioTrack.value;
         const v = localVideoTrack.value;
-        if (a) {
-            try { a.stop(); } catch { /* ignore */ }
-        }
-        if (v) {
-            try { v.stop(); } catch { /* ignore */ }
-        }
+        const s = localScreenTrack.value;
+        const cam = cameraTrackStash.value;
+        if (a) { try { a.stop(); } catch { /* */ } }
+        if (v) { try { v.stop(); } catch { /* */ } }
+        if (s) { try { s.stop(); } catch { /* */ } }
+        // The stashed camera may NOT be the same as v (if we're mid-
+        // screen-share, v is the screen track; the camera is parked
+        // here). Stop it too so the indicator goes dark.
+        if (cam && cam !== v) { try { cam.stop(); } catch { /* */ } }
         localAudioTrack.value = null;
         localVideoTrack.value = null;
+        localScreenTrack.value = null;
+        cameraTrackStash.value = null;
         isAudioMuted.value = false;
         isVideoOff.value = false;
+        isScreenSharing.value = false;
     }
 
     function errorMessage(e: unknown): string {
@@ -373,16 +515,20 @@ export function useTwilioBridge() {
         room,
         localAudioTrack,
         localVideoTrack,
+        localScreenTrack,
         remoteParticipants,
         dominantSpeakerIdentity,
         networkQualityLevel,
         isAudioMuted,
         isVideoOff,
+        isScreenSharing,
+        isRecording,
 
         // Actions
         connect,
         disconnect,
         toggleAudio,
         toggleVideo,
+        toggleScreenShare,
     };
 }
