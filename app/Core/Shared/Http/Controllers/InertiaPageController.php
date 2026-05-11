@@ -83,6 +83,15 @@ final class InertiaPageController extends Controller
         return Inertia::render('Commission/Payouts');
     }
 
+    public function commissionPlans(Request $request): Response
+    {
+        if (! $request->user()?->role->canSupervise()) {
+            abort(403);
+        }
+
+        return Inertia::render('Commission/Plans');
+    }
+
     public function complianceDnc(Request $request): Response
     {
         if (! $request->user()?->role->canSupervise()) {

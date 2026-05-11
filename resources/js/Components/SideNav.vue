@@ -47,6 +47,7 @@ const sections = computed<NavSection[]>(() => [
             { href: '/agents', label: 'Agents', icon: '◊', show: true },
             { href: '/supervisor/war-room', label: 'War Room', icon: '⌖', show: isSupervisor.value },
             { href: '/commission/payouts', label: 'Payouts', icon: '$', show: true },
+            { href: '/commission/plans', label: 'Commission plans', icon: '%', show: isSupervisor.value },
             { href: '/partner-sites', label: 'Partner sites', icon: '◇', show: isSupervisor.value },
             { href: '/compliance', label: 'Compliance', icon: '⊘', show: isSupervisor.value },
         ],

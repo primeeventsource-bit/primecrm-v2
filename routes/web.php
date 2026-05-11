@@ -49,6 +49,7 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
     Route::get('/booking/search', [InertiaPageController::class, 'bookingSearch'])->name('booking.search');
     Route::get('/payment/capture', [InertiaPageController::class, 'paymentCapture'])->name('payment.capture');
     Route::get('/commission/payouts', [InertiaPageController::class, 'commissionPayouts'])->name('commission.payouts');
+    Route::get('/commission/plans', [InertiaPageController::class, 'commissionPlans'])->name('commission.plans');
 
     // Supervisor-only — gated inside the controller.
     Route::get('/supervisor/war-room', [InertiaPageController::class, 'warRoom'])->name('supervisor.war_room');
