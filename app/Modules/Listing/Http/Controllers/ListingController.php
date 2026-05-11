@@ -5,9 +5,14 @@ declare(strict_types=1);
 namespace App\Modules\Listing\Http\Controllers;
 
 use App\Core\Shared\TenantContext;
+use App\Modules\Listing\Domain\Enums\ListingStatus;
+use App\Modules\Listing\Domain\Models\Listing;
+use App\Modules\Listing\Domain\Models\Property;
+use App\Modules\Listing\Http\Requests\StoreListingRequest;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -487,5 +492,168 @@ final class ListingController extends Controller
         ];
 
         return response()->json($payload);
+    }
+
+    /**
+     * Create a listing against an existing property.
+     *
+     * The property must belong to the tenant; if it isn't yet
+     * verified or the resort doesn't allow rental we still let the
+     * row through (operator override) but the response surfaces a
+     * warning so the UI can flag it.
+     *
+     * Owner payout defaulting:
+     *   - If owner_payout is provided, use it verbatim.
+     *   - Else if our_commission_pct is provided, compute it from
+     *     asking_price * (1 - pct/100).
+     *   - Else leave both null and let downstream booking-time math
+     *     figure the split.
+     */
+    public function store(StoreListingRequest $request): JsonResponse
+    {
+        $validated = $request->validated();
+        $tenantId = $this->tenantContext->id();
+
+        $property = Property::query()
+            ->where('id', $validated['property_id'])
+            ->first();
+
+        if ($property === null) {
+            return response()->json([
+                'message' => 'Property not found in this workspace.',
+                'errors' => ['property_id' => ['Property not found in this workspace.']],
+            ], 422);
+        }
+
+        // Compute owner payout if we got a commission % but no payout.
+        $askingPrice = (float) $validated['asking_price'];
+        $ownerPayout = $validated['owner_payout'] ?? null;
+        $commissionPct = $validated['our_commission_pct'] ?? null;
+
+        if ($ownerPayout === null && $commissionPct !== null) {
+            $ownerPayout = round($askingPrice * (1 - ((float) $commissionPct) / 100), 2);
+        }
+
+        // Default to pending_distribution; `go_live=true` short-circuits
+        // straight to live (use case: operator already pushed manually).
+        $status = $validated['status']
+            ?? (($validated['go_live'] ?? false)
+                ? ListingStatus::Live->value
+                : ListingStatus::PendingDistribution->value);
+
+        $listing = Listing::query()->create([
+            'tenant_id' => $tenantId,
+            'property_id' => $property->id,
+            'deal_id' => $validated['deal_id'] ?? null,
+            'check_in_date' => $validated['check_in_date'],
+            'check_out_date' => $validated['check_out_date'],
+            'asking_price' => $askingPrice,
+            'reserve_price' => $validated['reserve_price'] ?? null,
+            'owner_payout' => $ownerPayout,
+            'our_commission_pct' => $commissionPct,
+            'status' => $status,
+            'went_live_at' => $status === ListingStatus::Live->value
+                ? Carbon::now() : null,
+            'marketing_description' => $validated['marketing_description'] ?? null,
+        ]);
+
+        // Warnings the UI may want to surface — not validation errors,
+        // just operator-facing context after the row already saved.
+        $warnings = [];
+        if (! $property->ownership_verified) {
+            $warnings[] = 'Property ownership is not yet verified.';
+        }
+        if (! $property->rental_allowed_by_resort) {
+            $warnings[] = 'Resort has not confirmed rental is allowed for this unit.';
+        }
+
+        return response()->json([
+            'message' => 'Listing created.',
+            'data' => [
+                'id' => $listing->id,
+                'status' => $listing->status?->value,
+                'check_in_date' => $listing->check_in_date?->toDateString(),
+                'check_out_date' => $listing->check_out_date?->toDateString(),
+                'asking_price' => (float) $listing->asking_price,
+                'owner_payout' => $listing->owner_payout !== null
+                    ? (float) $listing->owner_payout : null,
+                'property' => [
+                    'id' => $property->id,
+                    'resort_name' => $property->resort_name,
+                    'location_label' => $property->locationLabel(),
+                ],
+            ],
+            'warnings' => $warnings,
+        ], 201);
+    }
+
+    /**
+     * Lightweight property list for the "Create listing" picker.
+     *
+     * Returns up to 50 rows, optionally filtered by a free-text query
+     * across owner name / resort name. Only tenant-scoped properties
+     * appear. Used by the modal — not a general property index.
+     */
+    public function propertiesPicker(Request $request): JsonResponse
+    {
+        $request->validate([
+            'q' => ['nullable', 'string', 'max:200'],
+            'only_rentable' => ['nullable', 'boolean'],
+        ]);
+
+        $tenantId = $this->tenantContext->id();
+        $q = $request->string('q')->value();
+        $onlyRentable = $request->boolean('only_rentable');
+
+        $query = DB::table('properties as p')
+            ->join('leads as o', 'o.id', '=', 'p.owner_id')
+            ->where('p.tenant_id', $tenantId)
+            ->whereNull('p.deleted_at');
+
+        if ($onlyRentable) {
+            $query->where('p.ownership_verified', true)
+                ->where('p.rental_allowed_by_resort', true);
+        }
+
+        if ($q !== '') {
+            $like = '%'.str_replace(['%', '_'], ['\\%', '\\_'], $q).'%';
+            $query->where(function ($qq) use ($like): void {
+                $qq->where('o.first_name', 'like', $like)
+                    ->orWhere('o.last_name', 'like', $like)
+                    ->orWhere('p.resort_name', 'like', $like)
+                    ->orWhere('p.location_city', 'like', $like);
+            });
+        }
+
+        $rows = $query
+            ->orderBy('p.resort_name')
+            ->limit(50)
+            ->get([
+                'p.id', 'p.resort_name', 'p.resort_brand',
+                'p.location_city', 'p.location_state',
+                'p.unit_number', 'p.bedrooms', 'p.sleeps',
+                'p.ownership_verified', 'p.rental_allowed_by_resort',
+                'o.id as owner_id', 'o.first_name', 'o.last_name',
+            ]);
+
+        return response()->json([
+            'data' => $rows->map(fn ($r) => [
+                'id' => $r->id,
+                'resort_name' => $r->resort_name,
+                'resort_brand' => $r->resort_brand,
+                'location_city' => $r->location_city,
+                'location_state' => $r->location_state,
+                'unit_number' => $r->unit_number,
+                'bedrooms' => $r->bedrooms !== null ? (int) $r->bedrooms : null,
+                'sleeps' => $r->sleeps !== null ? (int) $r->sleeps : null,
+                'ownership_verified' => (bool) $r->ownership_verified,
+                'rental_allowed_by_resort' => (bool) $r->rental_allowed_by_resort,
+                'owner' => [
+                    'id' => $r->owner_id,
+                    'name' => trim(($r->first_name ?? '').' '.($r->last_name ?? ''))
+                        ?: '(unnamed owner)',
+                ],
+            ])->values(),
+        ]);
     }
 }

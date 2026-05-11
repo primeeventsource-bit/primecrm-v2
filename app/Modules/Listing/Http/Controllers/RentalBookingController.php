@@ -5,11 +5,18 @@ declare(strict_types=1);
 namespace App\Modules\Listing\Http\Controllers;
 
 use App\Core\Shared\TenantContext;
+use App\Modules\Booking\Domain\Models\Booking;
+use App\Modules\Listing\Application\Services\BookingNotifier;
+use App\Modules\Listing\Domain\Enums\ListingStatus;
+use App\Modules\Listing\Domain\Models\Listing;
+use App\Modules\Listing\Http\Requests\StoreRentalBookingRequest;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 /**
  * Renter-side bookings ledger.
@@ -29,7 +36,10 @@ use Illuminate\Support\Facades\DB;
  */
 final class RentalBookingController extends Controller
 {
-    public function __construct(private readonly TenantContext $tenantContext) {}
+    public function __construct(
+        private readonly TenantContext $tenantContext,
+        private readonly BookingNotifier $notifier,
+    ) {}
 
     public function index(Request $request): JsonResponse
     {
@@ -192,6 +202,202 @@ final class RentalBookingController extends Controller
                 'status' => $statusFilter,
                 'q' => $q,
             ],
+        ]);
+    }
+
+    /**
+     * Create a rental booking manually against an existing listing.
+     *
+     * Mirrors RentalInquiryController::book() minus the inquiry side.
+     * Used for off-platform/phone bookings, back-fills, or any rental
+     * where we never had an inquiry row to convert. Flips the listing
+     * to Booked and (unless caller opts out) notifies the owner.
+     *
+     * Transactional: booking insert + listing status flip happen
+     * atomically. Owner notification fires after commit so a notify
+     * failure doesn't roll back the rental we just confirmed.
+     */
+    public function store(StoreRentalBookingRequest $request): JsonResponse
+    {
+        $validated = $request->validated();
+        $tenantId = $this->tenantContext->id();
+
+        $listing = Listing::query()->find($validated['listing_id']);
+        if ($listing === null || $listing->tenant_id !== $tenantId) {
+            return response()->json([
+                'message' => 'Listing not found in this workspace.',
+                'errors' => ['listing_id' => ['Listing not found in this workspace.']],
+            ], 422);
+        }
+
+        // Dates default to the listing window.
+        $checkIn = isset($validated['check_in_date'])
+            ? Carbon::parse($validated['check_in_date'])
+            : $listing->check_in_date;
+        $checkOut = isset($validated['check_out_date'])
+            ? Carbon::parse($validated['check_out_date'])
+            : $listing->check_out_date;
+
+        $total = (float) $validated['total_price'];
+
+        // Owner payout: explicit wins, else derive from commission %,
+        // else fall back to the listing's stored commission % or 15%.
+        $ownerPayout = $validated['owner_payout'] ?? null;
+        $commissionPct = $validated['commission_pct']
+            ?? ($listing->our_commission_pct !== null
+                ? (float) $listing->our_commission_pct
+                : null);
+
+        if ($ownerPayout === null) {
+            $pct = $commissionPct !== null ? (float) $commissionPct : 15.0;
+            $ourCommission = round($total * ($pct / 100), 2);
+            $ownerPayout = round($total - $ourCommission, 2);
+        } else {
+            $ownerPayout = (float) $ownerPayout;
+            $ourCommission = round($total - $ownerPayout, 2);
+        }
+
+        $payload = [
+            'tenant_id' => $tenantId,
+            'lead_id' => $listing->property?->owner_id,
+            'deal_id' => $listing->deal_id,
+            'agent_id' => $request->user()?->id,
+            'listing_id' => $listing->id,
+            'inquiry_id' => null,
+            'renter_name' => $validated['renter_name'],
+            'renter_email' => $validated['renter_email'] ?? null,
+            'renter_phone' => $validated['renter_phone'] ?? null,
+            'check_in_date' => $checkIn,
+            'check_out_date' => $checkOut,
+            'total_price' => $total,
+            'paid_amount' => 0,
+            'currency' => 'USD',
+            'owner_payout' => $ownerPayout,
+            'our_commission' => $ourCommission,
+            'status' => 'confirmed',
+            'payment_status' => $validated['payment_status'] ?? 'pending',
+            'confirmation_number' => 'PV-'.strtoupper(Str::random(8)),
+            'confirmed_at' => Carbon::now(),
+        ];
+
+        $booking = DB::transaction(function () use ($payload, $listing): Booking {
+            $b = Booking::query()->create($payload);
+            $listing->forceFill([
+                'status' => ListingStatus::Booked->value,
+            ])->save();
+
+            return $b->refresh();
+        });
+
+        // Owner notification — opt-out via notify_owner=false for the
+        // rare case where the operator has already informed the owner
+        // out-of-band and a duplicate note would be noisy.
+        $shouldNotify = ! array_key_exists('notify_owner', $validated)
+            || (bool) $validated['notify_owner'];
+        if ($shouldNotify) {
+            $this->notifier->notifyOwnerOfBooking($booking, $listing, $request->user());
+            $booking = $booking->refresh();
+        }
+
+        return response()->json([
+            'message' => 'Booking confirmed.',
+            'data' => [
+                'id' => $booking->id,
+                'confirmation_number' => $booking->confirmation_number,
+                'total_price' => (float) $booking->total_price,
+                'owner_payout' => (float) $booking->owner_payout,
+                'our_commission' => (float) $booking->our_commission,
+                'payment_status' => $booking->payment_status,
+                'check_in_date' => $booking->check_in_date?->toDateString(),
+                'check_out_date' => $booking->check_out_date?->toDateString(),
+                'owner_notified_at' => $booking->owner_notified_at?->toIso8601String(),
+                'listing' => [
+                    'id' => $listing->id,
+                    'status' => $listing->refresh()->status?->value,
+                ],
+            ],
+        ], 201);
+    }
+
+    /**
+     * Lightweight listing list for the "Create booking" picker.
+     *
+     * Returns up to 50 live/inquiry/pending-booking listings, with
+     * resort + owner names and the listing window pre-formatted so
+     * the modal's defaults render without an extra round-trip.
+     */
+    public function listingsPicker(Request $request): JsonResponse
+    {
+        $request->validate([
+            'q' => ['nullable', 'string', 'max:200'],
+            'include_booked' => ['nullable', 'boolean'],
+        ]);
+
+        $tenantId = $this->tenantContext->id();
+        $q = $request->string('q')->value();
+        $includeBooked = $request->boolean('include_booked');
+
+        $statuses = [
+            ListingStatus::Live->value,
+            ListingStatus::InquiryReceived->value,
+            ListingStatus::PendingBooking->value,
+        ];
+        if ($includeBooked) {
+            $statuses[] = ListingStatus::Booked->value;
+        }
+
+        $query = DB::table('listings as l')
+            ->join('properties as p', 'p.id', '=', 'l.property_id')
+            ->join('leads as o', 'o.id', '=', 'p.owner_id')
+            ->where('l.tenant_id', $tenantId)
+            ->whereNull('l.deleted_at')
+            ->whereIn('l.status', $statuses);
+
+        if ($q !== '') {
+            $like = '%'.str_replace(['%', '_'], ['\\%', '\\_'], $q).'%';
+            $query->where(function ($qq) use ($like): void {
+                $qq->where('o.first_name', 'like', $like)
+                    ->orWhere('o.last_name', 'like', $like)
+                    ->orWhere('p.resort_name', 'like', $like);
+            });
+        }
+
+        $rows = $query
+            ->orderBy('l.check_in_date')
+            ->limit(50)
+            ->get([
+                'l.id', 'l.status',
+                'l.check_in_date', 'l.check_out_date',
+                'l.asking_price', 'l.owner_payout', 'l.our_commission_pct',
+                'p.id as property_id', 'p.resort_name', 'p.resort_brand',
+                'p.location_city', 'p.location_state',
+                'o.id as owner_id', 'o.first_name', 'o.last_name',
+            ]);
+
+        return response()->json([
+            'data' => $rows->map(fn ($r) => [
+                'id' => $r->id,
+                'status' => $r->status,
+                'check_in_date' => $r->check_in_date,
+                'check_out_date' => $r->check_out_date,
+                'asking_price' => (float) $r->asking_price,
+                'owner_payout' => $r->owner_payout !== null
+                    ? (float) $r->owner_payout : null,
+                'our_commission_pct' => $r->our_commission_pct !== null
+                    ? (float) $r->our_commission_pct : null,
+                'property' => [
+                    'id' => $r->property_id,
+                    'resort_name' => $r->resort_name,
+                    'resort_brand' => $r->resort_brand,
+                    'location_city' => $r->location_city,
+                    'location_state' => $r->location_state,
+                ],
+                'owner' => [
+                    'id' => $r->owner_id,
+                    'name' => trim(($r->first_name ?? '').' '.($r->last_name ?? ''))
+                        ?: '(unnamed owner)',
+                ],
+            ])->values(),
         ]);
     }
 

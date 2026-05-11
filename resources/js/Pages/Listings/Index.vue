@@ -3,6 +3,8 @@ import { computed, onMounted, ref, watch } from 'vue';
 import axios from 'axios';
 import { Link, router } from '@inertiajs/vue3';
 import AppLayout from '@/Layouts/AppLayout.vue';
+import Modal from '@/Components/Modal.vue';
+import CreateListingForm from '@/Components/Listings/CreateListingForm.vue';
 
 /**
  * Listings hub — the post-sale operational view.
@@ -152,6 +154,15 @@ function partnerDot(s: string): string {
 function gotoListing(id: string): void {
     router.visit(`/listings/${id}`);
 }
+
+const createOpen = ref(false);
+
+function onListingCreated(payload: { id: string }): void {
+    createOpen.value = false;
+    // Jump straight to the new listing's detail page — the operator
+    // almost always wants to push it to partner sites next.
+    router.visit(`/listings/${payload.id}`);
+}
 </script>
 
 <template>
@@ -172,8 +183,15 @@ function gotoListing(id: string): void {
                         placeholder="search owner or resort"
                         class="input text-sm w-64"
                     />
+                    <button class="btn-primary text-sm" @click="createOpen = true">
+                        + Add listing
+                    </button>
                 </div>
             </div>
+
+            <Modal :open="createOpen" title="Add a listing" max-width="max-w-3xl" @close="createOpen = false">
+                <CreateListingForm @created="onListingCreated" @cancel="createOpen = false" />
+            </Modal>
 
             <!-- Tabs -->
             <div class="flex gap-1 border-b border-deck-line mb-4 overflow-x-auto">

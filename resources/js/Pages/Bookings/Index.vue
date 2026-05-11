@@ -3,6 +3,8 @@ import { computed, onMounted, ref, watch } from 'vue';
 import axios from 'axios';
 import { Link, router } from '@inertiajs/vue3';
 import AppLayout from '@/Layouts/AppLayout.vue';
+import Modal from '@/Components/Modal.vue';
+import CreateBookingForm from '@/Components/Bookings/CreateBookingForm.vue';
 
 /**
  * Bookings ledger — confirmed rentals across all listings.
@@ -150,6 +152,16 @@ function gotoListing(id: string): void {
 }
 
 const lastPage = computed(() => meta.value?.last_page ?? 1);
+
+const createOpen = ref(false);
+
+function onBookingCreated(): void {
+    createOpen.value = false;
+    // Refresh the ledger so the new booking appears + the aggregate
+    // strip updates immediately.
+    page.value = 1;
+    void load();
+}
 </script>
 
 <template>
@@ -163,13 +175,22 @@ const lastPage = computed(() => meta.value?.last_page ?? 1);
                         Confirmed rentals across all listings — the honest measure of whether the service works.
                     </p>
                 </div>
-                <input
-                    v-model="search"
-                    type="text"
-                    placeholder="search renter / confirmation / owner / resort"
-                    class="input text-sm w-72"
-                />
+                <div class="flex items-center gap-2">
+                    <input
+                        v-model="search"
+                        type="text"
+                        placeholder="search renter / confirmation / owner / resort"
+                        class="input text-sm w-72"
+                    />
+                    <button class="btn-primary text-sm whitespace-nowrap" @click="createOpen = true">
+                        + Add booking
+                    </button>
+                </div>
             </div>
+
+            <Modal :open="createOpen" title="Add a booking" max-width="max-w-3xl" @close="createOpen = false">
+                <CreateBookingForm @created="onBookingCreated" @cancel="createOpen = false" />
+            </Modal>
 
             <!-- Aggregate strip -->
             <div class="grid grid-cols-2 gap-3 sm:grid-cols-5 mb-4">

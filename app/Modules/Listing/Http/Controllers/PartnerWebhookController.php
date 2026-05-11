@@ -85,6 +85,13 @@ final class PartnerWebhookController extends Controller
             return response()->json(['message' => 'Unknown partner site.'], 404);
         }
 
+        // Set TenantContext from the matched site as early as possible.
+        // PartnerWebhookEvent is TenantScoped — its `creating` hook
+        // throws without a resolved tenant, which would silently drop
+        // the sig-failure log row below (the most operationally useful
+        // log line we write).
+        $this->tenants->set($site->tenant_id);
+
         // 2. Verify HMAC. Refuse if the partner hasn't been issued a
         //    secret yet, OR the signature header is missing, OR doesn't
         //    match. All three collapse to a single 401 so the partner
@@ -102,10 +109,6 @@ final class PartnerWebhookController extends Controller
             );
             return response()->json(['message' => 'Invalid signature.'], 401);
         }
-
-        // 3. Set TenantContext from the row — every model query below
-        //    runs tenant-scoped without any client-supplied tenant id.
-        $this->tenants->set($site->tenant_id);
 
         try {
             $payload = $request->validate([
@@ -264,6 +267,10 @@ final class PartnerWebhookController extends Controller
             return response()->json(['message' => 'Unknown partner site.'], 404);
         }
 
+        // Tenant context must be resolved BEFORE the sig-fail log row
+        // below — see the matching comment in inquiry().
+        $this->tenants->set($site->tenant_id);
+
         if (! $this->verifySignature($request, $site)) {
             $this->events->record(
                 request: $request,
@@ -275,8 +282,6 @@ final class PartnerWebhookController extends Controller
             );
             return response()->json(['message' => 'Invalid signature.'], 401);
         }
-
-        $this->tenants->set($site->tenant_id);
 
         try {
             $payload = $request->validate([
