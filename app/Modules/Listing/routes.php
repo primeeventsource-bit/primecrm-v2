@@ -25,9 +25,16 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
         ->whereUuid('id')
         ->name('api.owners.dossier');
 
-    // Listings management hub + detail.
+    // Listings management hub + detail + create.
     Route::get('/listings', [ListingController::class, 'index'])
         ->name('api.listings.index');
+    Route::post('/listings', [ListingController::class, 'store'])
+        ->name('api.listings.store');
+    // Property picker for the create-listing modal. Declared BEFORE
+    // the UUID-constrained {id} show route so the literal segment
+    // wins the route table; the UUID regex would 404 otherwise.
+    Route::get('/listings/properties-picker', [ListingController::class, 'propertiesPicker'])
+        ->name('api.listings.properties_picker');
     Route::get('/listings/{id}', [ListingController::class, 'show'])
         ->whereUuid('id')
         ->name('api.listings.show');
@@ -82,9 +89,14 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
             ->name('api.rental_inquiries.book');
     });
 
-    // Renter-side bookings ledger (the success-metric view).
+    // Renter-side bookings ledger (the success-metric view) +
+    // manual-create endpoint for off-platform / back-fill bookings.
     Route::get('/rental-bookings', [RentalBookingController::class, 'index'])
         ->name('api.rental_bookings.index');
+    Route::post('/rental-bookings', [RentalBookingController::class, 'store'])
+        ->name('api.rental_bookings.store');
+    Route::get('/rental-bookings/listings-picker', [RentalBookingController::class, 'listingsPicker'])
+        ->name('api.rental_bookings.listings_picker');
 });
 
 /*
