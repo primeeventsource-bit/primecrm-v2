@@ -14,6 +14,8 @@ use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 /**
  * Listing-management endpoints.
@@ -403,7 +405,10 @@ final class ListingController extends Controller
             'expires_at' => $listing->expires_at,
             'created_at' => $listing->created_at,
             'marketing_description' => $listing->marketing_description,
-            'photos' => $listing->photos !== null ? json_decode($listing->photos, true) : null,
+            // Model casts `photos` to array already; the previous
+            // json_decode was double-decoding and returning null in
+            // production where the cast had already run. Pass through.
+            'photos' => is_array($listing->photos) ? array_values($listing->photos) : [],
             'property' => [
                 'id' => $listing->property_id,
                 'resort_name' => $listing->resort_name,
@@ -656,4 +661,145 @@ final class ListingController extends Controller
             ])->values(),
         ]);
     }
+
+    /**
+     * Upload a photo to a listing's gallery.
+     *
+     *   POST /api/listings/{id}/photos
+     *   multipart/form-data with `photo` file part
+     *
+     * Stored on the `public` disk under listings/{listingId}/{uuid}.{ext}.
+     * The disk is symlinked at public/storage by `storage:link` in the
+     * deploy command, so the file is reachable at APP_URL/storage/...
+     *
+     * The `photos` JSON column on the listing holds an ordered list of
+     * URLs; we append, never replace. Cap at MAX_PHOTOS so a runaway
+     * upload script can't fill the bucket.
+     */
+    public function uploadPhoto(Request $request, string $id): JsonResponse
+    {
+        $request->validate([
+            // image rule catches MIME tricks the extension check would miss.
+            'photo' => ['required', 'image', 'mimes:jpg,jpeg,png,webp', 'max:5120'],
+        ]);
+
+        $listing = Listing::query()->find($id);
+        if ($listing === null) {
+            return response()->json(['message' => 'Listing not found'], 404);
+        }
+
+        $existing = is_array($listing->photos) ? $listing->photos : [];
+        if (count($existing) >= self::MAX_PHOTOS) {
+            return response()->json([
+                'message' => 'Photo limit reached.',
+                'errors' => ['photo' => ['This listing already has '.self::MAX_PHOTOS.' photos. Delete one first.']],
+            ], 422);
+        }
+
+        // Random filename — prevents the partner-site renderer from
+        // caching a previous owner's photo if the operator deletes +
+        // re-uploads with the same source filename.
+        $file = $request->file('photo');
+        $ext = $file->getClientOriginalExtension() ?: $file->extension();
+        $filename = Str::uuid()->toString().'.'.strtolower($ext);
+        $path = "listings/{$listing->id}/{$filename}";
+
+        Storage::disk('public')->putFileAs(
+            "listings/{$listing->id}",
+            $file,
+            $filename,
+        );
+
+        $url = Storage::disk('public')->url($path);
+
+        $existing[] = $url;
+        $listing->photos = $existing;
+        $listing->save();
+
+        return response()->json([
+            'url' => $url,
+            'photos' => $existing,
+        ], 201);
+    }
+
+    /**
+     * Delete a photo from a listing's gallery.
+     *
+     *   DELETE /api/listings/{id}/photos
+     *   { "url": "https://.../storage/listings/abc/def.jpg" }
+     *
+     * Removes the URL from the photos array and deletes the underlying
+     * file. The file delete is best-effort — if the file is already
+     * gone (cleaned by another process), we still want to scrub the
+     * URL from the array.
+     */
+    public function deletePhoto(Request $request, string $id): JsonResponse
+    {
+        $request->validate([
+            'url' => ['required', 'string', 'max:2000'],
+        ]);
+
+        $listing = Listing::query()->find($id);
+        if ($listing === null) {
+            return response()->json(['message' => 'Listing not found'], 404);
+        }
+
+        $existing = is_array($listing->photos) ? $listing->photos : [];
+        $target = $request->string('url')->value();
+
+        $remaining = array_values(array_filter($existing, fn ($u) => $u !== $target));
+
+        if (count($remaining) === count($existing)) {
+            // URL not in the array — return the current state so the
+            // client UI re-syncs but don't error (race-with-another-tab
+            // delete shouldn't show a red banner).
+            return response()->json(['photos' => $remaining]);
+        }
+
+        // Map URL back to disk path. The URL is APP_URL/storage/<path>
+        // when served from the public disk; we strip the prefix.
+        $relative = $this->urlToRelativePath($target, $listing->id);
+        if ($relative !== null) {
+            try {
+                Storage::disk('public')->delete($relative);
+            } catch (\Throwable) {
+                // File may already be gone; ignore.
+            }
+        }
+
+        $listing->photos = $remaining;
+        $listing->save();
+
+        return response()->json(['photos' => $remaining]);
+    }
+
+    /**
+     * Best-effort URL → disk-relative-path conversion. Accepts both
+     * full URLs (https://app.example.com/storage/listings/{id}/x.jpg)
+     * and bare relative paths (listings/{id}/x.jpg). We constrain the
+     * deletable path to listings/{listingId}/ so a malformed URL can
+     * never delete a file outside the listing's own folder.
+     */
+    private function urlToRelativePath(string $url, string $listingId): ?string
+    {
+        $needle = "listings/{$listingId}/";
+        $idx = strpos($url, $needle);
+        if ($idx === false) {
+            return null;
+        }
+        $relative = substr($url, $idx);
+        // No '..' or other traversal funny business — the prefix
+        // anchor above already constrains us, this is paranoia.
+        if (str_contains($relative, '..') || str_contains($relative, '//')) {
+            return null;
+        }
+        return $relative;
+    }
+
+    /**
+     * Hard cap on photos per listing. Partner sites typically reject
+     * listings with > 12 photos anyway; this is a sanity ceiling, not
+     * a brand-specific limit.
+     */
+    private const MAX_PHOTOS = 12;
 }

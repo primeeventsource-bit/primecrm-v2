@@ -39,6 +39,15 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
         ->whereUuid('id')
         ->name('api.listings.show');
 
+    // Photo gallery — multipart upload + delete by URL. Stored on the
+    // public disk; served at APP_URL/storage/listings/{id}/...
+    Route::post('/listings/{id}/photos', [ListingController::class, 'uploadPhoto'])
+        ->whereUuid('id')
+        ->name('api.listings.photos.upload');
+    Route::delete('/listings/{id}/photos', [ListingController::class, 'deletePhoto'])
+        ->whereUuid('id')
+        ->name('api.listings.photos.delete');
+
     // Per-listing partner-site distribution actions. The driver
     // pattern (see Application\Distribution\PartnerDriver) decides
     // whether each request hits a real partner API or the mock

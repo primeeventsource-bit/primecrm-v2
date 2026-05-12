@@ -315,6 +315,96 @@ async function markInquiryLost(id: string): Promise<void> {
     }
 }
 
+/* ------------------------------------------------------------------
+ | Photo gallery — multipart upload to the public disk.
+ |
+ | Drag-drop OR file-picker selection. We POST one image at a time so
+ | a 4MB photo doesn't gate a 200KB photo on the same upload, and so a
+ | network blip mid-batch only loses one file.
+ |------------------------------------------------------------------ */
+const photoInputEl = ref<HTMLInputElement | null>(null);
+const photoUploading = ref(false);
+const photoDragOver = ref(false);
+const photoError = ref<string | null>(null);
+/** 1..N — the index currently being uploaded out of `photoUploadTotal`. */
+const photoUploadIndex = ref(0);
+const photoUploadTotal = ref(0);
+
+async function uploadPhotoFiles(files: FileList | File[]): Promise<void> {
+    if (!detail.value) return;
+    const list = Array.from(files).filter((f) => f.type.startsWith('image/'));
+    if (list.length === 0) {
+        photoError.value = 'Pick an image file (JPG, PNG, or WEBP).';
+        return;
+    }
+    photoUploading.value = true;
+    photoError.value = null;
+    photoUploadTotal.value = list.length;
+    photoUploadIndex.value = 0;
+
+    for (const file of list) {
+        photoUploadIndex.value += 1;
+        const fd = new FormData();
+        fd.append('photo', file);
+        try {
+            const { data } = await axios.post<{ photos: string[] }>(
+                `/api/listings/${props.listingId}/photos`,
+                fd,
+                { headers: { 'Content-Type': 'multipart/form-data' } },
+            );
+            // Sync the local detail.photos so the grid updates per-file
+            // (so the operator sees progress instead of one big jump).
+            if (detail.value) detail.value.photos = data.photos;
+        } catch (e: unknown) {
+            const resp = (e as { response?: { data?: { errors?: Record<string, string[]>; message?: string } } }).response;
+            const msg = resp?.data?.errors?.photo?.[0] ?? resp?.data?.message ?? 'Upload failed.';
+            photoError.value = msg;
+            break; // stop the batch — operator can re-try after fixing the issue
+        }
+    }
+
+    photoUploading.value = false;
+    photoUploadIndex.value = 0;
+    photoUploadTotal.value = 0;
+}
+
+function onPhotoInputChange(e: Event): void {
+    const input = e.target as HTMLInputElement;
+    if (input.files && input.files.length > 0) {
+        void uploadPhotoFiles(input.files);
+        // Clear so re-selecting the same file fires `change` again.
+        input.value = '';
+    }
+}
+
+function onPhotoDrop(e: DragEvent): void {
+    e.preventDefault();
+    photoDragOver.value = false;
+    if (e.dataTransfer && e.dataTransfer.files.length > 0) {
+        void uploadPhotoFiles(e.dataTransfer.files);
+    }
+}
+
+async function deletePhoto(url: string): Promise<void> {
+    if (!detail.value) return;
+    if (!window.confirm('Delete this photo? Partner sites will lose it on the next sync.')) return;
+    try {
+        const { data } = await axios.delete<{ photos: string[] }>(
+            `/api/listings/${props.listingId}/photos`,
+            { data: { url } },
+        );
+        if (detail.value) detail.value.photos = data.photos;
+    } catch (e: unknown) {
+        const msg = (e as { response?: { data?: { message?: string } } }).response?.data?.message;
+        photoError.value = msg ?? 'Could not delete photo.';
+    }
+}
+
+const MAX_PHOTOS = 12;
+const photosFull = computed(() => {
+    return (detail.value?.photos?.length ?? 0) >= MAX_PHOTOS;
+});
+
 onMounted(load);
 
 /* ------------------------------------------------------------------ */
@@ -482,6 +572,95 @@ function activityColor(kind: string): string {
                     <p v-if="detail.marketing_description" class="mt-4 text-sm text-deck-soft italic">
                         "{{ detail.marketing_description }}"
                     </p>
+                </section>
+
+                <!-- ============================== PHOTOS ============================== -->
+                <section class="panel p-5 mb-4">
+                    <div class="flex items-center justify-between mb-3">
+                        <div>
+                            <h3 class="text-sm font-semibold text-deck-text">Photos</h3>
+                            <p class="text-xs text-deck-dim">
+                                What renters see on partner sites. JPG / PNG / WEBP, max 5MB each, up to {{ MAX_PHOTOS }} total.
+                            </p>
+                        </div>
+                        <span class="text-xs font-mono tabular-nums text-deck-soft">
+                            {{ detail.photos?.length ?? 0 }} / {{ MAX_PHOTOS }}
+                        </span>
+                    </div>
+
+                    <!-- Existing photo grid + add tile -->
+                    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+                        <div
+                            v-for="(url, idx) in (detail.photos ?? [])"
+                            :key="url"
+                            class="group relative aspect-square overflow-hidden rounded-md border border-deck-line bg-deck-bg"
+                        >
+                            <img
+                                :src="url"
+                                :alt="`${detail.property.resort_name} photo ${idx + 1}`"
+                                class="h-full w-full object-cover"
+                                loading="lazy"
+                            />
+                            <button
+                                type="button"
+                                class="absolute right-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wider text-white opacity-0 transition-opacity group-hover:opacity-100 hover:bg-rose-600/90"
+                                title="Delete photo"
+                                @click="deletePhoto(url)"
+                            >
+                                ✕ delete
+                            </button>
+                        </div>
+
+                        <!-- Drag-drop upload tile -->
+                        <label
+                            v-if="!photosFull"
+                            class="flex aspect-square cursor-pointer flex-col items-center justify-center rounded-md border-2 border-dashed text-center transition-colors"
+                            :class="photoDragOver
+                                ? 'border-floor-accent bg-floor-accent/[0.06]'
+                                : 'border-deck-line bg-deck-bg hover:border-floor-accent/50 hover:bg-floor-accent/[0.03]'"
+                            @dragover.prevent="photoDragOver = true"
+                            @dragenter.prevent="photoDragOver = true"
+                            @dragleave.prevent="photoDragOver = false"
+                            @drop="onPhotoDrop"
+                        >
+                            <input
+                                ref="photoInputEl"
+                                type="file"
+                                accept="image/jpeg,image/png,image/webp"
+                                multiple
+                                class="hidden"
+                                :disabled="photoUploading"
+                                @change="onPhotoInputChange"
+                            />
+                            <div v-if="photoUploading" class="px-2 text-xs text-deck-soft">
+                                <div class="font-mono tabular-nums">
+                                    {{ photoUploadIndex }} / {{ photoUploadTotal }}
+                                </div>
+                                <div class="mt-1">Uploading…</div>
+                            </div>
+                            <div v-else class="px-2 text-xs text-deck-soft">
+                                <div class="text-2xl text-deck-dim">+</div>
+                                <div class="mt-1">Add photos</div>
+                                <div class="mt-0.5 text-[10px] text-deck-dim">drop or click</div>
+                            </div>
+                        </label>
+                    </div>
+
+                    <!-- Upload error -->
+                    <div
+                        v-if="photoError"
+                        class="mt-3 rounded-md border border-floor-lose/30 bg-floor-lose/10 px-3 py-2 text-xs text-floor-lose"
+                    >
+                        {{ photoError }}
+                    </div>
+
+                    <!-- Empty state — only when there are zero photos AND we just rendered the add tile -->
+                    <div
+                        v-if="(detail.photos?.length ?? 0) === 0"
+                        class="mt-3 text-xs italic text-deck-dim"
+                    >
+                        No photos yet. Renters skip listings without photos — add at least three.
+                    </div>
                 </section>
 
                 <div class="grid grid-cols-1 gap-4 xl:grid-cols-3">
