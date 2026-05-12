@@ -625,25 +625,23 @@ Leave Soketi-specific vars (`PUSHER_HOST`, `PUSHER_PORT`, `PUSHER_SCHEME`) **uns
 
 ### Process types
 
-Configure these in Cloud's process editor:
+Configure these in Cloud's process editor. The original design intended Horizon for the worker process and Octane for web; the current deployed env runs the simpler combination below (Horizon is still installed and configured in `config/horizon.php` — switch the Worker process when you're ready):
 
-| Type | Command | Why |
+| Type | Command | Notes |
 |---|---|---|
-| Web | (default — Cloud runs `octane:start --server=frankenphp`) | Octane HTTP server |
-| Worker | `php artisan horizon` | one process; Horizon manages all six supervisors internally |
+| Web | (Cloud default — php-fpm + nginx) | Octane requires opting in; flip `usesOctane:true` and switch worker to `php artisan octane:start --server=frankenphp` |
+| Worker | `php artisan queue:work database --sleep=10 --quiet` | current deployed worker. For Horizon, replace with `php artisan horizon` (one process; Horizon manages all six supervisors internally — do not add a separate worker per supervisor) |
 | Scheduler | `php artisan schedule:work` | drives the cron entries in `routes/console.php` |
-
-Do **not** add a separate worker per Horizon supervisor — Horizon spawns its own subprocess pool and sizes them per `config/horizon.php`.
 
 ### Build & deploy hooks
 
-Cloud's default Laravel build runs `composer install --no-dev` and `php artisan optimize`. Add these post-deploy commands in Cloud's UI:
+Cloud's default Laravel build runs `composer install --no-dev` and `php artisan optimize`. Set these post-deploy commands in Cloud's UI (this is the env's current `deployCommand`):
 
 ```bash
-php artisan migrate --force
-php artisan storage:link
-php artisan horizon:terminate   # graceful restart of queue workers
+php artisan migrate --force && php artisan storage:link && php artisan queue:restart
 ```
+
+`queue:restart` writes a flag to cache that every `php artisan queue:work` worker checks each loop iteration, so they gracefully exit after the current job and the supervisor relaunches them with the new code. If you switch the worker to Horizon, replace `queue:restart` with `horizon:terminate` — `horizon:terminate` exits non-zero if Horizon isn't actually running, which is why the simpler `queue:restart` is correct for the current env.
 
 ### What's intentionally not here
 
