@@ -299,9 +299,14 @@ final class SeedSampleDataCommand extends Command
         $deal->closed_at = Carbon::now()->subDays(15);
         $deal->notes = "[crm:sample-data] Sample listing-fee agreement for {$s['resort']}.";
         $deal->listing_fee = $listingFee;
-        $deal->listing_fee_collected = true;
+        // listing_fee_collected is the AMOUNT collected (decimal:2),
+        // not a boolean flag. Full payment for samples.
+        $deal->listing_fee_collected = $listingFee;
         $deal->payment_status = 'paid_in_full';
-        $deal->agreement_status = 'active';
+        // AgreementStatus 'Live' = listing-fee paid + verification done
+        // + listing actively distributed. Closest to the sample state
+        // we're modeling (a real listing that's gone live).
+        $deal->agreement_status = 'live';
         $deal->listing_term_months = 12;
         $deal->term_expires_at = Carbon::now()->addMonths(12);
         $deal->tcpa_disclosure_completed = true;
