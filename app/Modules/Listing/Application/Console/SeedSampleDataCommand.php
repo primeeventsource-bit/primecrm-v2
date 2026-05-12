@@ -88,10 +88,16 @@ final class SeedSampleDataCommand extends Command
             // Three owner leads → three properties → three deals → three
             // listings, one per status the operator most needs to see:
             // live, pending_distribution, and booked.
+            //
+            // Phone numbers use the +1-555-01xx reserved-for-fiction
+            // range so they cannot ring real subscribers in any North
+            // American area — safe on a CRM with a real Twilio account
+            // attached.
             $samples = [
                 [
                     'first' => 'Sample-Marcus', 'last' => 'Patel',
                     'email' => 'marcus.sample@example.com',
+                    'phone' => '+15555550101',
                     'resort' => 'Marriott Aruba Surf Club',
                     'brand' => 'Marriott',
                     'city' => 'Palm Beach', 'state' => 'AW',
@@ -107,6 +113,7 @@ final class SeedSampleDataCommand extends Command
                 [
                     'first' => 'Sample-Anita', 'last' => 'Cole',
                     'email' => 'anita.sample@example.com',
+                    'phone' => '+15555550102',
                     'resort' => 'Wyndham Bonnet Creek',
                     'brand' => 'Wyndham',
                     'city' => 'Orlando', 'state' => 'FL',
@@ -122,6 +129,7 @@ final class SeedSampleDataCommand extends Command
                 [
                     'first' => 'Sample-Priya', 'last' => 'Shah',
                     'email' => 'priya.sample@example.com',
+                    'phone' => '+15555550103',
                     'resort' => 'Hyatt Maui Ka\'anapali',
                     'brand' => 'Hyatt',
                     'city' => 'Lahaina', 'state' => 'HI',
@@ -206,6 +214,11 @@ final class SeedSampleDataCommand extends Command
         $lead->first_name = $s['first'];
         $lead->last_name = $s['last'];
         $lead->email = $s['email'];
+        // leads.phone is NOT NULL on the production MySQL schema (no
+        // default). Use the +1-555-01xx reserved-for-fiction range so
+        // these can never ring a real subscriber even on a tenant
+        // wired up to a live Twilio number.
+        $lead->phone = $s['phone'];
         // Sample owners represent leads that converted to a listing-fee
         // deal — ClosedWon is the matching status. No "Customer" enum
         // value exists; that domain concept lives on the Customer model.
