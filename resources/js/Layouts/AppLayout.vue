@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed } from 'vue';
 import { Head, usePage } from '@inertiajs/vue3';
 import SideNav from '@/Components/SideNav.vue';
 import AgentStatusPill from '@/Components/AgentStatusPill.vue';
+import HeaderClock from '@/Components/HeaderClock.vue';
 import type { PageProps } from '@/types/api';
 
 defineProps<{ title?: string }>();
@@ -11,22 +12,11 @@ const page = usePage<PageProps>();
 const user = computed(() => page.props.auth.user);
 const flash = computed(() => page.props.flash);
 
-// Live clock in the header — small thing, but a visible heartbeat
-// reminds floor managers the deck is alive and synced.
-const now = ref(new Date());
-let tick: number | undefined;
-onMounted(() => {
-    tick = window.setInterval(() => (now.value = new Date()), 1000);
-});
-onUnmounted(() => {
-    if (tick !== undefined) window.clearInterval(tick);
-});
-const clock = computed(() =>
-    now.value.toLocaleTimeString('en-US', { hour12: false })
-);
-const dateLabel = computed(() =>
-    now.value.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
-);
+// Live clock is extracted to <HeaderClock> so its 1-second tick
+// doesn't invalidate this layout's slot. Otherwise every modal +
+// form in the page underneath would re-render every second, which
+// the user perceived as the popup flickering + inputs refusing
+// characters mid-keystroke.
 </script>
 
 <template>
@@ -39,11 +29,7 @@ const dateLabel = computed(() =>
             <header class="flex items-center justify-between border-b border-deck-line bg-deck-surface px-6 py-3">
                 <div class="flex items-center gap-4">
                     <h1 class="text-lg font-semibold text-deck-text">{{ title ?? 'Floor OS' }}</h1>
-                    <span class="hidden sm:flex items-center gap-2 text-xs font-mono tabular-nums text-deck-dim">
-                        <span class="deck-dot-live"></span>
-                        <span class="text-deck-soft">{{ clock }}</span>
-                        <span>· {{ dateLabel }}</span>
-                    </span>
+                    <HeaderClock />
                 </div>
                 <div class="flex items-center gap-4">
                     <AgentStatusPill v-if="user" />
