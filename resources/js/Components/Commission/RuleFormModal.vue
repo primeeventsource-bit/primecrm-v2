@@ -2,8 +2,8 @@
 import { computed, ref, watch } from 'vue';
 import axios from 'axios';
 import Modal from '@/Components/Modal.vue';
+import { buildRuleConfig, type RuleType, type TieredBracket } from './ruleConfig';
 
-type RuleType = 'percentage' | 'flat' | 'override' | 'tiered' | 'bonus';
 type Role = 'closer' | 'fronter' | 'supervisor' | 'qa' | 'override';
 
 interface RuleInput {
@@ -19,6 +19,10 @@ interface RuleInput {
 const props = defineProps<{ open: boolean; planId: string; rule: RuleInput | null }>();
 const emit = defineEmits<{ (e: 'saved'): void; (e: 'close'): void }>();
 
+function emptyBracket(): TieredBracket {
+    return { up_to: null, rate: 0 };
+}
+
 const form = ref({
     role: 'closer' as Role,
     rule_type: 'percentage' as RuleType,
@@ -27,11 +31,21 @@ const form = ref({
     active: true,
 
     // Per-type fields (flattened for the form, repacked into `config` on submit)
-    pct_rate: '8' as string,        // percentage rule, as %
+    pct_rate: '8' as string,
     pct_base_field: 'amount',
-    flat_amount: '' as string,      // flat rule, dollars
-    override_rate: '1' as string,   // override rule, as %
-    raw_config: '' as string,       // fallback for tiered/bonus
+    flat_amount: '' as string,
+    override_rate: '1' as string,
+
+    // Structured tiered editor
+    tiered_base_field: 'amount',
+    tiered_marginal: false,
+    tiered_brackets: [
+        { up_to: 5000, rate: 0.05 },
+        { up_to: null, rate: 0.08 }, // top tier
+    ] as TieredBracket[],
+
+    // Bonus fallback — raw JSON (engine doesn't process bonus yet)
+    raw_config: '' as string,
 });
 
 const errors = ref<Record<string, string[]>>({});
@@ -44,18 +58,29 @@ watch(
         errors.value = {};
         const r = props.rule;
         if (r) {
-            const cfg = r.config ?? {};
+            const cfg = (r.config ?? {}) as Record<string, unknown>;
             form.value = {
                 role: r.role,
                 rule_type: r.rule_type,
                 trigger_event: r.trigger_event,
                 priority: r.priority,
                 active: r.active,
+
                 pct_rate: cfg.rate != null ? String((Number(cfg.rate) * 100).toFixed(2)).replace(/\.00$/, '') : '8',
                 pct_base_field: (cfg.base_field as string) ?? 'amount',
                 flat_amount: cfg.amount != null ? String(cfg.amount) : '',
                 override_rate: cfg.override_rate != null ? String((Number(cfg.override_rate) * 100).toFixed(2)).replace(/\.00$/, '') : '1',
-                raw_config: JSON.stringify(cfg, null, 2),
+
+                tiered_base_field: (cfg.base_field as string) ?? 'amount',
+                tiered_marginal: Boolean(cfg.marginal),
+                tiered_brackets: Array.isArray(cfg.brackets) && cfg.brackets.length > 0
+                    ? (cfg.brackets as TieredBracket[]).map((b) => ({
+                        up_to: b.up_to == null ? null : Number(b.up_to),
+                        rate: Number(b.rate),
+                    }))
+                    : [emptyBracket()],
+
+                raw_config: r.rule_type === 'bonus' ? JSON.stringify(cfg, null, 2) : '',
             };
         } else {
             form.value = {
@@ -68,6 +93,12 @@ watch(
                 pct_base_field: 'amount',
                 flat_amount: '',
                 override_rate: '1',
+                tiered_base_field: 'amount',
+                tiered_marginal: false,
+                tiered_brackets: [
+                    { up_to: 5000, rate: 0.05 },
+                    { up_to: null, rate: 0.08 },
+                ],
                 raw_config: '',
             };
         }
@@ -78,39 +109,25 @@ watch(
 const showPercentageFields = computed(() => form.value.rule_type === 'percentage');
 const showFlatFields = computed(() => form.value.rule_type === 'flat');
 const showOverrideFields = computed(() => form.value.rule_type === 'override');
-const showRawJsonFields = computed(() => form.value.rule_type === 'tiered' || form.value.rule_type === 'bonus');
+const showTieredFields = computed(() => form.value.rule_type === 'tiered');
+const showBonusFields = computed(() => form.value.rule_type === 'bonus');
 
-function buildConfig(): Record<string, unknown> | null {
-    switch (form.value.rule_type) {
-        case 'percentage':
-            return {
-                rate: Number(form.value.pct_rate) / 100,
-                base_field: form.value.pct_base_field || 'amount',
-            };
-        case 'flat':
-            return { amount: Number(form.value.flat_amount) };
-        case 'override':
-            return { override_rate: Number(form.value.override_rate) / 100 };
-        case 'tiered':
-        case 'bonus':
-            // For complex types we accept hand-edited JSON. Catch parse
-            // errors here so we surface them as a form error rather than
-            // a 422 from the server.
-            try {
-                return JSON.parse(form.value.raw_config || '{}');
-            } catch {
-                return null;
-            }
-    }
+function addBracket(): void {
+    form.value.tiered_brackets.push(emptyBracket());
+}
+
+function removeBracket(idx: number): void {
+    form.value.tiered_brackets.splice(idx, 1);
+    if (form.value.tiered_brackets.length === 0) addBracket();
 }
 
 async function submit(): Promise<void> {
     submitting.value = true;
     errors.value = {};
 
-    const config = buildConfig();
-    if (config === null) {
-        errors.value.config = ['Config JSON is not valid.'];
+    const result = buildRuleConfig(form.value);
+    if (result.config === null) {
+        errors.value.config = [result.error ?? 'Invalid config.'];
         submitting.value = false;
         return;
     }
@@ -119,7 +136,7 @@ async function submit(): Promise<void> {
         role: form.value.role,
         rule_type: form.value.rule_type,
         trigger_event: form.value.trigger_event,
-        config,
+        config: result.config,
         priority: form.value.priority,
         active: form.value.active,
     };
@@ -167,8 +184,8 @@ async function submit(): Promise<void> {
                         <option value="percentage">Percentage</option>
                         <option value="flat">Flat amount</option>
                         <option value="override">Override on others' commission</option>
-                        <option value="tiered">Tiered (advanced)</option>
-                        <option value="bonus">Bonus (advanced)</option>
+                        <option value="tiered">Tiered</option>
+                        <option value="bonus">Bonus (placeholder)</option>
                     </select>
                 </div>
                 <div>
@@ -183,7 +200,6 @@ async function submit(): Promise<void> {
                 </div>
             </div>
 
-            <!-- Type-specific fields -->
             <div v-if="showPercentageFields" class="grid grid-cols-2 gap-3 rounded-md border border-slate-200 p-3">
                 <div>
                     <label class="label">Rate (%)</label>
@@ -215,10 +231,85 @@ async function submit(): Promise<void> {
                 </div>
             </div>
 
-            <div v-if="showRawJsonFields" class="rounded-md border border-amber-200 bg-amber-50 p-3">
+            <div v-if="showTieredFields" class="rounded-md border border-slate-200 p-3">
+                <div class="grid grid-cols-2 gap-3 mb-3">
+                    <div>
+                        <label class="label">Base field</label>
+                        <input v-model="form.tiered_base_field" type="text" class="input mt-1" />
+                        <p class="mt-1 text-xs text-slate-500">Payload key the tiers apply to. Usually <code>amount</code>.</p>
+                    </div>
+                    <div class="flex items-end">
+                        <label class="flex items-center gap-2 text-sm text-slate-700">
+                            <input v-model="form.tiered_marginal" type="checkbox" />
+                            <span>Marginal mode</span>
+                        </label>
+                    </div>
+                </div>
+
+                <p class="text-xs text-slate-500 mb-2">
+                    <b>Non-marginal</b> (default): the matching tier's rate applies to the whole base.
+                    <b>Marginal</b>: each portion of the base is paid at its tier's rate (true marginal). The top tier
+                    leaves <i>Up to</i> blank for "unbounded".
+                </p>
+
+                <table class="min-w-full text-sm">
+                    <thead>
+                        <tr class="text-left text-xs uppercase text-slate-400">
+                            <th class="py-1 pr-3">Up to ($)</th>
+                            <th class="py-1 pr-3">Rate (%)</th>
+                            <th class="py-1"></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="(b, i) in form.tiered_brackets" :key="i" class="align-middle">
+                            <td class="py-1 pr-3">
+                                <input
+                                    :value="b.up_to ?? ''"
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    class="input w-32"
+                                    placeholder="(top tier)"
+                                    @input="(e) => {
+                                        const v = (e.target as HTMLInputElement).value;
+                                        form.tiered_brackets[i].up_to = v === '' ? null : Number(v);
+                                    }"
+                                />
+                            </td>
+                            <td class="py-1 pr-3">
+                                <div class="flex items-stretch w-32">
+                                    <input
+                                        :value="b.rate != null ? (b.rate * 100) : ''"
+                                        type="number"
+                                        min="0"
+                                        max="100"
+                                        step="0.01"
+                                        class="input rounded-r-none"
+                                        @input="(e) => {
+                                            const v = (e.target as HTMLInputElement).value;
+                                            form.tiered_brackets[i].rate = v === '' ? 0 : Number(v) / 100;
+                                        }"
+                                    />
+                                    <span class="inline-flex items-center rounded-r-md border border-l-0 border-slate-300 bg-slate-50 px-2 text-xs text-slate-500">%</span>
+                                </div>
+                            </td>
+                            <td class="py-1">
+                                <button type="button" class="text-xs text-red-600 hover:underline" @click="removeBracket(i)">Remove</button>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+                <button type="button" class="btn-ghost mt-2 text-xs text-slate-700 hover:bg-slate-100" @click="addBracket">+ Add bracket</button>
+                <p v-if="errors.config" class="mt-1 text-xs text-red-600">{{ errors.config[0] }}</p>
+            </div>
+
+            <div v-if="showBonusFields" class="rounded-md border border-amber-200 bg-amber-50 p-3">
                 <label class="label">Config JSON</label>
-                <textarea v-model="form.raw_config" rows="6" class="input mt-1 font-mono text-xs" placeholder='{"brackets": [{"up_to": 10000, "rate": 0.05}, {"up_to": null, "rate": 0.08}]}' />
-                <p class="mt-1 text-xs text-amber-700">Tiered and bonus rules need a hand-written config. See CommissionPlanRule docblock.</p>
+                <textarea v-model="form.raw_config" rows="6" class="input mt-1 font-mono text-xs" placeholder='{"threshold": 10, "amount": 500}' />
+                <p class="mt-1 text-xs text-amber-700">
+                    Bonus rules are a placeholder — they aren't applied by the engine yet. You can stage a config now,
+                    but no payouts will fire until the period-rollup handler ships.
+                </p>
                 <p v-if="errors.config" class="mt-1 text-xs text-red-600">{{ errors.config[0] }}</p>
             </div>
 

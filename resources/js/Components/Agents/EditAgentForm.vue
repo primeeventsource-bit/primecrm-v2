@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import axios from 'axios';
+import { buildAgentPatch, type AgentSnapshot, type PayType } from './agentPatch';
 
 const props = defineProps<{ agentId: string }>();
 const emit = defineEmits<{ (e: 'updated'): void; (e: 'cancel'): void }>();
-
-type PayType = 'hourly' | 'salary' | 'commission_only' | 'hybrid';
 
 interface CommissionPlanOption {
     id: string;
@@ -13,27 +12,11 @@ interface CommissionPlanOption {
     description: string | null;
 }
 
-interface AgentLoaded {
+interface AgentLoaded extends AgentSnapshot {
     id: string;
     first_name: string;
     last_name: string;
     email: string;
-    role: string;
-    phone: string | null;
-    extension: string | null;
-    timezone: string | null;
-    is_panama_based: boolean;
-    status?: string;
-    pay_type: PayType | null;
-    base_rate_cents: number | null;
-    pay_currency: string | null;
-    pay_notes: string | null;
-    commission: {
-        plan_id: string;
-        plan_name: string;
-        effective_from: string | null;
-        override_rate_pct: number | null;
-    } | null;
 }
 
 const loading = ref(true);
@@ -116,56 +99,15 @@ onMounted(async () => {
     }
 });
 
-/**
- * Build a minimal patch: only include fields whose value differs from the
- * loaded snapshot. Cleared commission/base_rate is sent as explicit null
- * (server treats null as "clear", undefined as "unchanged").
- */
-function buildPatch(): Record<string, unknown> {
-    if (!initial.value) return {};
-    const a = initial.value;
-    const patch: Record<string, unknown> = {};
-
-    if (form.value.first_name !== (a.first_name ?? '')) patch.first_name = form.value.first_name;
-    if (form.value.last_name !== (a.last_name ?? '')) patch.last_name = form.value.last_name;
-    if (form.value.role !== a.role) patch.role = form.value.role;
-    if (form.value.phone !== (a.phone ?? '')) patch.phone = form.value.phone || null;
-    if (form.value.extension !== (a.extension ?? '')) patch.extension = form.value.extension || null;
-    if (form.value.timezone !== (a.timezone ?? 'America/New_York')) patch.timezone = form.value.timezone;
-    if (form.value.is_panama_based !== a.is_panama_based) patch.is_panama_based = form.value.is_panama_based;
-    if (form.value.status !== (a.status ?? 'active')) patch.status = form.value.status;
-
-    // Compensation
-    if (form.value.pay_type !== (a.pay_type ?? 'commission_only')) patch.pay_type = form.value.pay_type;
-
-    const newRate = form.value.base_rate === '' ? null : Number(form.value.base_rate);
-    const oldRate = a.base_rate_cents != null ? a.base_rate_cents / 100 : null;
-    if (newRate !== oldRate) patch.base_rate = newRate;
-
-    if (form.value.pay_currency !== (a.pay_currency ?? 'USD')) patch.pay_currency = form.value.pay_currency || null;
-    if (form.value.pay_notes !== (a.pay_notes ?? '')) patch.pay_notes = form.value.pay_notes || null;
-
-    // Commission — send both fields together if the plan changed,
-    // since override on a different plan is a different concept.
-    const newPlanId = form.value.commission_plan_id || null;
-    const oldPlanId = a.commission?.plan_id ?? null;
-    const newOverride = form.value.commission_override_rate === '' ? null : Number(form.value.commission_override_rate);
-    const oldOverride = a.commission?.override_rate_pct ?? null;
-
-    if (newPlanId !== oldPlanId || newOverride !== oldOverride) {
-        patch.commission_plan_id = newPlanId;
-        // Override only meaningful when a plan is set.
-        patch.commission_override_rate = newPlanId === null ? null : newOverride;
-    }
-
-    return patch;
-}
-
 async function submit(): Promise<void> {
     submitting.value = true;
     errors.value = {};
 
-    const patch = buildPatch();
+    if (!initial.value) {
+        submitting.value = false;
+        return;
+    }
+    const patch = buildAgentPatch(initial.value, form.value);
     if (Object.keys(patch).length === 0) {
         emit('cancel');
         submitting.value = false;
