@@ -17,21 +17,31 @@ use Illuminate\Support\Facades\DB;
 /**
  * Hold creation and release.
  *
- * Concurrency model — two layers:
+ * Concurrency model — two layers, both engine-aware:
  *
- *   1. Postgres advisory lock per (tenant, unit, check_in_date).
- *      Acquired with `pg_advisory_xact_lock(hashtextextended(...))` so
- *      it's automatically released at end of transaction. This serializes
- *      simultaneous hold attempts on the same week. Without it, two
- *      requests doing SELECT-then-UPDATE could both see "available" and
- *      race to the partial unique index.
+ *   1. Advisory lock per (unit, check_in_date), keyed by a hash of the
+ *      tuple. Dispatched per driver in {@see acquireAdvisoryLock}:
+ *        - Postgres: `pg_advisory_xact_lock(hashtextextended(...))`,
+ *          auto-released at end of transaction.
+ *        - MySQL/MariaDB: `GET_LOCK(name, 5)` — session-scoped, so we
+ *          register a transaction-commit/rollback hook to call
+ *          `RELEASE_LOCK` deterministically. The 64-char identifier
+ *          limit is respected by md5-prefixing the tuple.
+ *        - sqlite (tests): no-op. SQLite serializes writes anyway.
+ *      Without the lock, two requests doing SELECT-then-UPDATE could
+ *      both see "available" and race the row update.
  *
- *   2. Partial unique index on inventory_availability
+ *   2. `lockForUpdate()` on the `inventory_availability` row inside
+ *      the transaction. This is the structural backstop and works on
+ *      every engine. The advisory lock just shortens the contention
+ *      window when many agents pile onto the same week.
+ *
+ *      The Postgres-only partial unique index on
  *      (inventory_unit_id, check_in_date) WHERE status IN
- *      ('available','held','booked'). The advisory lock above prevents
- *      most races; the index is the structural backstop. If something
- *      slips past the lock (cross-transaction, replication lag), the
- *      index makes the second commit fail with 23505.
+ *      ('available','held','booked') was removed when the project
+ *      moved to MySQL — see the comment in the booking migration.
+ *      `UniqueConstraintViolationException` is still caught below to
+ *      stay tolerant of any environment that brings it back.
  *
  * Hold TTL comes from the resort's `hold_ttl_minutes` setting (default
  * 30 min). Holds expire automatically via the scheduled
@@ -56,62 +66,76 @@ final class HoldService
         ?string $dealId = null,
         ?int $ttlMinutesOverride = null,
     ): InventoryHold {
-        return DB::transaction(function () use ($availability, $heldByUserId, $leadId, $dealId, $ttlMinutesOverride): InventoryHold {
-            $this->acquireAdvisoryLock($availability->inventory_unit_id, $availability->check_in_date->toDateString());
+        // Lock acquisition lives outside the transaction so that
+        // engines requiring explicit release (MySQL GET_LOCK) get a
+        // deterministic try/finally release path on both commit and
+        // rollback. Postgres' pg_advisory_lock is session-scoped here
+        // too — release() is the inverse on every supported engine.
+        $releaseAdvisoryLock = $this->acquireAdvisoryLock(
+            $availability->inventory_unit_id,
+            $availability->check_in_date->toDateString(),
+        );
 
-            // Re-fetch under the lock — state may have shifted since the
-            // caller's read.
-            /** @var InventoryAvailability $fresh */
-            $fresh = InventoryAvailability::query()
-                ->lockForUpdate()
-                ->find($availability->id);
+        try {
+            return DB::transaction(function () use ($availability, $heldByUserId, $leadId, $dealId, $ttlMinutesOverride): InventoryHold {
+                // Re-fetch under the row lock — state may have shifted
+                // since the caller's read. `lockForUpdate()` is the
+                // structural race guard; the advisory lock above just
+                // shortens the contention window.
+                /** @var InventoryAvailability $fresh */
+                $fresh = InventoryAvailability::query()
+                    ->lockForUpdate()
+                    ->find($availability->id);
 
-            if ($fresh === null || ! $fresh->isAvailable()) {
-                throw InventoryUnavailableException::forUnit(
-                    $availability->inventory_unit_id,
-                    $availability->check_in_date->toDateString(),
+                if ($fresh === null || ! $fresh->isAvailable()) {
+                    throw InventoryUnavailableException::forUnit(
+                        $availability->inventory_unit_id,
+                        $availability->check_in_date->toDateString(),
+                    );
+                }
+
+                $ttl = $ttlMinutesOverride
+                    ?? (int) ($fresh->resort?->hold_ttl_minutes ?? 30);
+
+                try {
+                    $hold = InventoryHold::query()->create([
+                        'inventory_availability_id' => $fresh->id,
+                        'lead_id' => $leadId,
+                        'deal_id' => $dealId,
+                        'held_by_id' => $heldByUserId,
+                        'expires_at' => now()->addMinutes($ttl),
+                    ]);
+
+                    $fresh->update([
+                        'status' => InventoryAvailability::STATUS_HELD,
+                        'current_hold_id' => $hold->id,
+                    ]);
+                } catch (UniqueConstraintViolationException $e) {
+                    throw InventoryUnavailableException::forUnit(
+                        $availability->inventory_unit_id,
+                        $availability->check_in_date->toDateString(),
+                    );
+                }
+
+                $this->audit->record(
+                    action: 'inventory.hold_created',
+                    entityType: 'inventory_hold',
+                    entityId: $hold->id,
+                    context: [
+                        'availability_id' => $fresh->id,
+                        'lead_id' => $leadId,
+                        'deal_id' => $dealId,
+                        'expires_at' => $hold->expires_at?->toIso8601String(),
+                    ],
                 );
-            }
 
-            $ttl = $ttlMinutesOverride
-                ?? (int) ($fresh->resort?->hold_ttl_minutes ?? 30);
+                HoldCreated::dispatch($hold);
 
-            try {
-                $hold = InventoryHold::query()->create([
-                    'inventory_availability_id' => $fresh->id,
-                    'lead_id' => $leadId,
-                    'deal_id' => $dealId,
-                    'held_by_id' => $heldByUserId,
-                    'expires_at' => now()->addMinutes($ttl),
-                ]);
-
-                $fresh->update([
-                    'status' => InventoryAvailability::STATUS_HELD,
-                    'current_hold_id' => $hold->id,
-                ]);
-            } catch (UniqueConstraintViolationException $e) {
-                throw InventoryUnavailableException::forUnit(
-                    $availability->inventory_unit_id,
-                    $availability->check_in_date->toDateString(),
-                );
-            }
-
-            $this->audit->record(
-                action: 'inventory.hold_created',
-                entityType: 'inventory_hold',
-                entityId: $hold->id,
-                context: [
-                    'availability_id' => $fresh->id,
-                    'lead_id' => $leadId,
-                    'deal_id' => $dealId,
-                    'expires_at' => $hold->expires_at?->toIso8601String(),
-                ],
-            );
-
-            HoldCreated::dispatch($hold);
-
-            return $hold;
-        });
+                return $hold;
+            });
+        } finally {
+            $releaseAdvisoryLock();
+        }
     }
 
     /**
@@ -202,17 +226,72 @@ final class HoldService
     }
 
     /**
-     * pg_advisory_xact_lock takes a 64-bit signed bigint. We hash the
-     * (unit, date) tuple to a stable bigint via Postgres' hashtextextended.
+     * Acquire an advisory lock on (unit, check_in_date). Returns a
+     * release closure the caller MUST invoke (use try/finally — see
+     * {@see hold()}). Dispatched per driver:
      *
-     * The lock is auto-released at end of transaction; callers don't
-     * release it explicitly.
+     * - pgsql: `pg_advisory_lock(hashtextextended(...))` + matching
+     *   `pg_advisory_unlock`. Session-scoped (we deliberately don't use
+     *   `pg_advisory_xact_lock` so the acquire/release shape is uniform
+     *   with MySQL and lives outside the transaction).
+     * - mysql/mariadb: `GET_LOCK(name, 5)` + `RELEASE_LOCK`. Name is
+     *   md5-prefixed to stay under the 64-char limit.
+     * - other (sqlite for tests): no-op closure. SQLite serializes
+     *   writes; the in-transaction `lockForUpdate()` is sufficient.
+     *
+     * The advisory lock just shortens the contention window. The
+     * structural race guard is `lockForUpdate()` on the
+     * inventory_availability row inside the transaction.
      */
-    private function acquireAdvisoryLock(string $unitId, string $checkInDate): void
+    private function acquireAdvisoryLock(string $unitId, string $checkInDate): \Closure
     {
-        DB::statement(
-            'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
-            ["{$unitId}:{$checkInDate}"],
+        $connection = DB::connection();
+        $driver = $connection->getDriverName();
+        $key = "{$unitId}:{$checkInDate}";
+
+        return match ($driver) {
+            'pgsql' => $this->acquirePostgresLock($connection, $key),
+            'mysql', 'mariadb' => $this->acquireMysqlLock($connection, $key),
+            default => fn () => null,
+        };
+    }
+
+    private function acquirePostgresLock(\Illuminate\Database\Connection $connection, string $key): \Closure
+    {
+        // hashtextextended returns a 64-bit signed bigint that
+        // pg_advisory_lock takes directly.
+        $connection->statement(
+            'SELECT pg_advisory_lock(hashtextextended(?, 0))',
+            [$key],
         );
+
+        return function () use ($connection, $key): void {
+            $connection->statement(
+                'SELECT pg_advisory_unlock(hashtextextended(?, 0))',
+                [$key],
+            );
+        };
+    }
+
+    private function acquireMysqlLock(\Illuminate\Database\Connection $connection, string $key): \Closure
+    {
+        // 64-char limit on MySQL lock names — md5 fits in 32 and is
+        // unique enough for advisory purposes (collision implies the
+        // same key, which is exactly the serialization we want).
+        $name = 'hold:'.md5($key);
+
+        $result = $connection->selectOne('SELECT GET_LOCK(?, 5) AS acquired', [$name]);
+
+        // GET_LOCK returns 1 on success, 0 on timeout, NULL on error.
+        // On timeout we proceed unlocked — lockForUpdate() inside the
+        // transaction is still correct serialization, just slower under
+        // contention. No throw.
+        $acquired = $result && (int) $result->acquired === 1;
+
+        return function () use ($connection, $name, $acquired): void {
+            if ($acquired) {
+                $connection->statement('DO RELEASE_LOCK(?)', [$name]);
+            }
+        };
     }
 }
