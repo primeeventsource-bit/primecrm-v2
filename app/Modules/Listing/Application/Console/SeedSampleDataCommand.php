@@ -214,11 +214,14 @@ final class SeedSampleDataCommand extends Command
         $lead->first_name = $s['first'];
         $lead->last_name = $s['last'];
         $lead->email = $s['email'];
-        // leads.phone is NOT NULL on the production MySQL schema (no
-        // default). Use the +1-555-01xx reserved-for-fiction range so
-        // these can never ring a real subscriber even on a tenant
-        // wired up to a live Twilio number.
+        // leads.phone + leads.phone_hash are both NOT NULL on the
+        // production MySQL schema (no defaults). The hash is
+        // sha256(E.164) — see Core\Shared\Services\PhoneNormalizer.
+        // Inlined here to avoid a service dependency in a one-off
+        // command. Numbers use the +1-555-01xx reserved-for-fiction
+        // range so they can never ring a real subscriber.
         $lead->phone = $s['phone'];
+        $lead->phone_hash = hash('sha256', $s['phone']);
         // Sample owners represent leads that converted to a listing-fee
         // deal — ClosedWon is the matching status. No "Customer" enum
         // value exists; that domain concept lives on the Customer model.
