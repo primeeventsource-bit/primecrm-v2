@@ -30,7 +30,14 @@ use Twilio\Rest\Video\V1\RoomInstance;
  * 4xx also doesn't tick the breaker counter; bad input from one user
  * shouldn't lock everyone else out of healthy Twilio.
  */
-final class TwilioRoomService
+/**
+ * NOT `final`: the test suite extends this class to bypass the real
+ * Twilio\Rest\Client constructor argument (the SDK has no friendly
+ * test double) and expose the private `withResilience` wrapper.
+ * Production code should not subclass — the resilience contract is
+ * the public API. See tests/Unit/CallCenter/PrimeConnect/TwilioRoomServiceTest.
+ */
+class TwilioRoomService
 {
     /** HTTP statuses that justify a retry (transient on Twilio's side). */
     private const RETRYABLE_STATUSES = [429, 500, 502, 503, 504];

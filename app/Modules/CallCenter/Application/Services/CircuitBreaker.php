@@ -122,7 +122,15 @@ final class CircuitBreaker
 
     public function open(): void
     {
-        $this->cache->put($this->key('opened_at'), time(), $this->cooldownSeconds);
+        // The cache TTL must outlast the cooldown — otherwise the
+        // `opened_at` key expires the instant we'd transition to
+        // HALF_OPEN and state() falls back to CLOSED, skipping the
+        // trial-call window entirely. We keep it alive for an extra
+        // window beyond cooldown so the half-open trial has time to
+        // happen; close() clears it on success, open() re-arms it on
+        // failure.
+        $ttl = $this->cooldownSeconds + $this->windowSeconds;
+        $this->cache->put($this->key('opened_at'), time(), $ttl);
         $this->cache->forget($this->key('failures'));
     }
 

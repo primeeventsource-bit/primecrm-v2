@@ -1,5 +1,5 @@
 import { onBeforeUnmount, onMounted } from 'vue';
-import type Echo from 'laravel-echo';
+import type { PusherEcho } from '@/echo';
 
 type Listener = (payload: Record<string, unknown>) => void;
 
@@ -22,7 +22,7 @@ export function useEcho() {
     }
 
     onMounted(() => {
-        const echo: Echo | undefined = window.Echo;
+        const echo: PusherEcho | undefined = window.Echo;
         if (!echo) return;
 
         for (const sub of subs) {
@@ -31,7 +31,7 @@ export function useEcho() {
     });
 
     onBeforeUnmount(() => {
-        const echo: Echo | undefined = window.Echo;
+        const echo: PusherEcho | undefined = window.Echo;
         if (!echo) return;
 
         const channels = new Set(subs.map((s) => s.channel));

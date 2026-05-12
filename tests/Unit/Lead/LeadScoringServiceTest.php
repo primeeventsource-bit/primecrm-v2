@@ -71,12 +71,15 @@ it('clamps the score to zero when penalties exceed contributions', function () {
 it('applies the configured priority weight verbatim', function () {
     $service = new LeadScoringService;
 
-    foreach ([
-        LeadPriority::Low => 0,
-        LeadPriority::Normal => 50,
-        LeadPriority::High => 200,
-        LeadPriority::Hot => 500,
-    ] as $priority => $expected) {
+    // Enum cases can't be array keys (PHP allows only int|string).
+    // Iterate as a list of tuples instead.
+    $cases = [
+        [LeadPriority::Low, 0],
+        [LeadPriority::Normal, 50],
+        [LeadPriority::High, 200],
+        [LeadPriority::Hot, 500],
+    ];
+    foreach ($cases as [$priority, $expected]) {
         $lead = makeStubLead(['priority' => $priority, 'phone' => '+14155551234', 'created_at' => now()]);
         $result = $service->compute($lead);
         expect($result['breakdown']['priority'])->toBe($expected);

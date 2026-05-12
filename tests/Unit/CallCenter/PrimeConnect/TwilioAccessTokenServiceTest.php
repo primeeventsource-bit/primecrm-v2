@@ -99,11 +99,17 @@ it('falls back to the configured TTL when none is passed', function () {
     $config = configWithTwilio(['prime-connect' => ['token' => ['ttl_minutes' => 15]]]);
     $service = new TwilioAccessTokenService($config);
 
+    $before = time();
     $token = $service->mint('agent:01HX');
     $payload = decodeJwtPayload($token->jwt);
 
-    $ttl = ((int) $payload['exp']) - ((int) $payload['iat']);
-    expect($ttl)->toBe(15 * 60);
+    // Twilio's AccessToken JWT doesn't include an `iat` claim — it
+    // only sets `exp` = time() + ttl at mint. Compute the effective
+    // TTL by comparing exp against the wall clock around the mint
+    // call (same pattern as the first test in this file).
+    $effectiveTtl = ((int) $payload['exp']) - $before;
+    expect($effectiveTtl)->toBeGreaterThanOrEqual(15 * 60)
+        ->and($effectiveTtl)->toBeLessThanOrEqual(15 * 60 + 2); // 2s wall-clock fudge
 });
 
 it('throws when Twilio credentials are blank rather than minting an unsigned junk token', function () {

@@ -88,8 +88,8 @@ onUnmounted(() => {
     if (refreshTimer !== undefined) window.clearInterval(refreshTimer);
 });
 
-function fmtMoney(n: number): string {
-    if (!n) return '$0';
+function fmtMoney(n: number | null | undefined): string {
+    if (n == null || !n) return '$0';
     if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
     if (n >= 1000) return `$${(n / 1000).toFixed(1)}k`;
     return '$' + Math.round(n).toLocaleString('en-US');

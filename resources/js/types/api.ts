@@ -17,6 +17,13 @@ export interface AuthUser {
     permissions: string[];
 }
 
+/**
+ * Inertia v1 requires page-prop interfaces to be assignable to
+ * `Record<string, unknown>` so the generic
+ * `usePage<PageProps>()` constraint is satisfied. The index
+ * signature is the contract; the declared keys are what consumers
+ * actually read.
+ */
 export interface PageProps {
     auth: { user: AuthUser | null };
     flash: { success?: string; error?: string };
@@ -26,6 +33,7 @@ export interface PageProps {
         key: string;
         cluster: string;
     };
+    [key: string]: unknown;
 }
 
 export type AgentStatusValue =

@@ -10,8 +10,11 @@ namespace App\Modules\Compliance\Application\Services;
  * The §6 priority order is:
  *   1. Compliance rescue   (the agent just crossed a line)
  *   2. Objection handling  (the owner just objected)
- *   3. Value proposition   (lull in conversation)
- *   4. Closing techniques  (owner is warming up)
+ *   3. Closing techniques  (owner signalled assent — strongest non-
+ *                           red-zone signal we have, beats the value
+ *                           fallback even on short utterances)
+ *   4. Value proposition   (lull in conversation — fallback when no
+ *                           explicit signal matched)
  *
  * The rules engine evaluates 1 → 4 and returns the first match.
  * Compliance rescue is also detected by ProhibitedPhraseScanner;
@@ -75,7 +78,21 @@ final class CoachRuleEngine
             }
         }
 
-        // 3. Value proposition — surfaces when the conversation is
+        // 3. Closing — owner is warming up; nudge toward commitment.
+        //    Checked BEFORE the value fallback so "OK that sounds good"
+        //    (assent + short) routes to a close hint instead of being
+        //    swallowed by the "they're quiet" path.
+        if (preg_match('/\b(yes|sure|ok(ay)?|sounds good|makes sense|why not)\b/i', $utterance)) {
+            return [
+                'priority' => 'close',
+                'red_zone' => false,
+                'hint' => 'CLOSE: "Great — would you like me to walk through the agreement and capture the disclosures now, or would you prefer a verifier call back tomorrow?"',
+                'rationale' => 'Owner signaled assent — present the close path.',
+                'matches' => [],
+            ];
+        }
+
+        // 4. Value proposition — surfaces when the conversation is
         //    quiet (short utterance, no question, no commitment cue).
         if (str_word_count($utterance) < 8) {
             $value = self::VALUE_HINTS[array_rand(self::VALUE_HINTS)];
@@ -85,17 +102,6 @@ final class CoachRuleEngine
                 'red_zone' => false,
                 'hint' => $value,
                 'rationale' => 'Owner is quiet — surface a documented service input.',
-                'matches' => [],
-            ];
-        }
-
-        // 4. Closing — owner is warming up; nudge toward commitment.
-        if (preg_match('/\b(yes|sure|ok(ay)?|sounds good|makes sense|why not)\b/i', $utterance)) {
-            return [
-                'priority' => 'close',
-                'red_zone' => false,
-                'hint' => 'CLOSE: "Great — would you like me to walk through the agreement and capture the disclosures now, or would you prefer a verifier call back tomorrow?"',
-                'rationale' => 'Owner signaled assent — present the close path.',
                 'matches' => [],
             ];
         }

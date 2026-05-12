@@ -206,7 +206,10 @@ final class SeedSampleDataCommand extends Command
         $lead->first_name = $s['first'];
         $lead->last_name = $s['last'];
         $lead->email = $s['email'];
-        $lead->status = LeadStatus::Customer->value;
+        // Sample owners represent leads that converted to a listing-fee
+        // deal — ClosedWon is the matching status. No "Customer" enum
+        // value exists; that domain concept lives on the Customer model.
+        $lead->status = LeadStatus::ClosedWon->value;
         $lead->source = 'sample_data';
         $lead->source_metadata = ['seeded_by' => self::MARKER];
         $lead->has_express_consent = true;

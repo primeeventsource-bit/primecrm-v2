@@ -15,14 +15,27 @@ createInertiaApp({
     setup({ el, App, props, plugin }) {
         const pinia = createPinia();
 
-        initEcho(props.initialPage.props as { echo: { host: string; key: string; cluster: string } });
+        // Inertia's PageProps type is `Record<string, unknown>`-ish;
+        // our concrete shape declares an `echo` key. A double-cast
+        // (through unknown) avoids TS's "non-overlapping types"
+        // complaint without weakening the runtime contract.
+        const echoProps = props.initialPage.props as unknown as {
+            echo: { host: string; key: string; cluster: string };
+        };
+        initEcho(echoProps);
 
-        return createApp({ render: () => h(App, props) })
+        const app = createApp({ render: () => h(App, props) })
             .use(plugin)
             .use(pinia)
             .component('Link', Link)
-            .component('Head', Head)
-            .mount(el);
+            .component('Head', Head);
+
+        // setup() is typed as returning `void | App`; mount() itself
+        // returns a ComponentPublicInstance, which is NOT assignable
+        // to App. Mount as a side-effect and return the App so Inertia
+        // can keep its handle for SSR-mode parity if it ever fires.
+        app.mount(el);
+        return app;
     },
     progress: {
         color: '#22c55e',

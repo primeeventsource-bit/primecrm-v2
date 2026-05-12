@@ -44,15 +44,13 @@ function newRoomService(int $retryAttempts = 3, int $threshold = 3): TwilioRoomS
     ]);
 
     // We don't actually invoke the Twilio client in these tests — we
-    // exercise the resilience wrapper directly. Pass null and rely on the
-    // method-level reflection to call withResilience without touching
-    // ->video->v1->rooms.
-    return new class(null, $breaker, $config) extends TwilioRoomService {
-        public function __construct(?\Twilio\Rest\Client $twilio, CircuitBreaker $breaker, Config $config)
-        {
-            parent::__construct($twilio ?? new \stdClass, $breaker, $config); // @phpstan-ignore-line
-        }
+    // exercise the resilience wrapper directly. A bare Mockery mock
+    // satisfies the `Client $twilio` constructor type hint without
+    // needing real Twilio credentials; we never call methods on it.
+    /** @var \Twilio\Rest\Client $client */
+    $client = \Mockery::mock(\Twilio\Rest\Client::class);
 
+    return new class($client, $breaker, $config) extends TwilioRoomService {
         // Expose the private wrapper for direct testing.
         public function exec(callable $op): mixed
         {

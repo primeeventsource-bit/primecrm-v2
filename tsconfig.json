@@ -12,7 +12,9 @@
         "isolatedModules": true,
         "useDefineForClassFields": true,
         "lib": ["ES2022", "DOM", "DOM.Iterable"],
-        "types": ["node"],
+        // vite/client gives us import.meta.env + import.meta.glob types;
+        // node is kept for @types/node primitives used in build configs.
+        "types": ["node", "vite/client"],
         "baseUrl": ".",
         "paths": {
             "@/*": ["resources/js/*"]
@@ -22,5 +24,10 @@
         "resources/js/**/*.ts",
         "resources/js/**/*.d.ts",
         "resources/js/**/*.vue"
+    ],
+    "exclude": [
+        // vitest isn't in devDependencies (yet); excluding these so a
+        // vue-tsc run doesn't fail before the test runner is wired up.
+        "resources/js/**/*.test.ts"
     ]
 }
