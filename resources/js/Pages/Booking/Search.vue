@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue';
 import axios from 'axios';
 import AppLayout from '@/Layouts/AppLayout.vue';
+import AddInventoryModal from '@/Components/Inventory/AddInventoryModal.vue';
 
 interface Availability {
     id: string;
@@ -61,11 +62,39 @@ async function hold(a: Availability): Promise<void> {
 }
 
 onMounted(search);
+
+const addOpen = ref(false);
+
+function onInventoryAdded(): void {
+    addOpen.value = false;
+    // Refresh the result set so the new row shows up if it matches
+    // the current filters. Cheap and predictable.
+    void search();
+}
 </script>
 
 <template>
     <AppLayout title="Inventory Search">
         <div class="p-6">
+            <div class="mb-4 flex items-center justify-between">
+                <div>
+                    <h1 class="text-2xl font-semibold text-slate-900">Inventory</h1>
+                    <p class="text-sm text-slate-500">
+                        Resort weeks available to rent. Search to find one, or add new inventory below.
+                    </p>
+                </div>
+                <button class="btn-primary text-sm" @click="addOpen = true">
+                    + Add inventory
+                </button>
+            </div>
+
+            <AddInventoryModal
+                :open="addOpen"
+                @close="addOpen = false"
+                @created="onInventoryAdded"
+                @imported="onInventoryAdded"
+            />
+
             <section class="panel mb-4 grid grid-cols-2 gap-3 p-4 lg:grid-cols-5">
                 <div>
                     <label class="label">Check-in from</label>
