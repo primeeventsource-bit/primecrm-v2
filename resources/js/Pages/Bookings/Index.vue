@@ -3,8 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import axios from 'axios';
 import { Link, router } from '@inertiajs/vue3';
 import AppLayout from '@/Layouts/AppLayout.vue';
-import Modal from '@/Components/Modal.vue';
-import CreateBookingForm from '@/Components/Bookings/CreateBookingForm.vue';
+import AddBookingModal from '@/Components/Bookings/AddBookingModal.vue';
 
 /**
  * Bookings ledger — confirmed rentals across all listings.
@@ -188,9 +187,12 @@ function onBookingCreated(): void {
                 </div>
             </div>
 
-            <Modal :open="createOpen" title="Add a booking" max-width="max-w-3xl" @close="createOpen = false">
-                <CreateBookingForm @created="onBookingCreated" @cancel="createOpen = false" />
-            </Modal>
+            <AddBookingModal
+                :open="createOpen"
+                @close="createOpen = false"
+                @created="onBookingCreated"
+                @imported="onBookingCreated"
+            />
 
             <!-- Aggregate strip -->
             <div class="grid grid-cols-2 gap-3 sm:grid-cols-5 mb-4">

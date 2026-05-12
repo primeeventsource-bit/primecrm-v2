@@ -3,8 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import axios from 'axios';
 import { Link, router } from '@inertiajs/vue3';
 import AppLayout from '@/Layouts/AppLayout.vue';
-import Modal from '@/Components/Modal.vue';
-import CreateListingForm from '@/Components/Listings/CreateListingForm.vue';
+import AddListingModal from '@/Components/Listings/AddListingModal.vue';
 
 /**
  * Listings hub — the post-sale operational view.
@@ -159,9 +158,17 @@ const createOpen = ref(false);
 
 function onListingCreated(payload: { id: string }): void {
     createOpen.value = false;
-    // Jump straight to the new listing's detail page — the operator
-    // almost always wants to push it to partner sites next.
+    // Singular path: jump to detail so the operator can push to
+    // partner sites next.
     router.visit(`/listings/${payload.id}`);
+}
+
+function onListingsImported(): void {
+    createOpen.value = false;
+    // Bulk path: stay on the index and reload — operator just
+    // imported potentially many rows.
+    page.value = 1;
+    void load();
 }
 </script>
 
@@ -189,9 +196,12 @@ function onListingCreated(payload: { id: string }): void {
                 </div>
             </div>
 
-            <Modal :open="createOpen" title="Add a listing" max-width="max-w-3xl" @close="createOpen = false">
-                <CreateListingForm @created="onListingCreated" @cancel="createOpen = false" />
-            </Modal>
+            <AddListingModal
+                :open="createOpen"
+                @close="createOpen = false"
+                @created="onListingCreated"
+                @imported="onListingsImported"
+            />
 
             <!-- Tabs -->
             <div class="flex gap-1 border-b border-deck-line mb-4 overflow-x-auto">

@@ -5,14 +5,20 @@ declare(strict_types=1);
 namespace App\Modules\Listing\Http\Controllers;
 
 use App\Core\Shared\TenantContext;
+use App\Modules\Listing\Application\Services\ListingCsvParser;
+use App\Modules\Listing\Application\Services\ListingImporter;
 use App\Modules\Listing\Domain\Enums\ListingStatus;
 use App\Modules\Listing\Domain\Models\Listing;
 use App\Modules\Listing\Domain\Models\Property;
+use App\Modules\Listing\Http\Requests\ListingBulkImportRequest;
+use App\Modules\Listing\Http\Requests\ListingBulkPreviewRequest;
 use App\Modules\Listing\Http\Requests\StoreListingRequest;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -37,7 +43,11 @@ use Illuminate\Support\Str;
  */
 final class ListingController extends Controller
 {
-    public function __construct(private readonly TenantContext $tenantContext) {}
+    public function __construct(
+        private readonly TenantContext $tenantContext,
+        private readonly ListingCsvParser $parser,
+        private readonly ListingImporter $importer,
+    ) {}
 
     public function index(Request $request): JsonResponse
     {
@@ -802,4 +812,123 @@ final class ListingController extends Controller
      * a brand-specific limit.
      */
     private const MAX_PHOTOS = 12;
+
+    /* ----------------------------------------------------------------
+     | Bulk import (CSV / Excel)
+     | ----------------------------------------------------------------
+     | Two-step flow: preview → import. The preview parses the upload,
+     | flags new owners + new properties for operator approval, and
+     | stashes the parsed payload in cache. The import endpoint
+     | commits with the approval flags inside one DB transaction.
+     */
+
+    public function template(): Response
+    {
+        $headers = [
+            'owner_email', 'owner_phone', 'owner_first_name', 'owner_last_name',
+            'resort_name', 'resort_brand', 'city', 'state', 'country',
+            'unit_number', 'bedrooms', 'sleeps', 'ownership_type',
+            'check_in_date', 'check_out_date',
+            'asking_price', 'reserve_price', 'our_commission_pct',
+            'marketing_description', 'go_live',
+        ];
+        $examples = [
+            ['jane.doe@example.com', '+15551234567', 'Jane', 'Doe',
+                'Marriott Newport Coast Villas', 'Marriott', 'Newport Beach', 'CA', 'US',
+                '4321', '2', '6', 'deeded',
+                '2026-07-04', '2026-07-11',
+                '2950.00', '2500.00', '15',
+                'Ocean view, walk to beach.', 'no'],
+            ['bob@example.com', '', 'Bob', 'Smith',
+                'Westgate Park City Resort', 'Westgate', 'Park City', 'UT', 'US',
+                '', '1', '4', 'points',
+                '2026-12-26', '2027-01-02',
+                '3800.00', '', '15',
+                'Holiday week, ski-in/ski-out.', 'yes'],
+        ];
+
+        $lines = [implode(',', $headers)];
+        foreach ($examples as $row) {
+            $lines[] = implode(',', array_map(fn ($v) => $this->csvField((string) $v), $row));
+        }
+
+        return response(implode("\n", $lines)."\n", 200, [
+            'Content-Type' => 'text/csv; charset=utf-8',
+            'Content-Disposition' => 'attachment; filename="listings-template.csv"',
+        ]);
+    }
+
+    public function bulkPreview(ListingBulkPreviewRequest $request): JsonResponse
+    {
+        $tenantId = $this->tenantContext->id();
+        $parsed = $this->parser->parse($request->file('file'));
+        $resolved = $this->importer->resolveAgainstTenant($tenantId, $parsed);
+
+        $token = (string) Str::uuid();
+        Cache::put(
+            $this->previewCacheKey($tenantId, $token),
+            $resolved,
+            now()->addMinutes(30),
+        );
+
+        return response()->json([
+            'preview_token' => $token,
+            'summary' => $resolved['summary'],
+            'rows' => $resolved['rows'],
+            'new_owners' => $resolved['new_owners'],
+            'new_properties' => $resolved['new_properties'],
+        ]);
+    }
+
+    public function bulkImport(ListingBulkImportRequest $request): JsonResponse
+    {
+        $tenantId = $this->tenantContext->id();
+        $token = (string) $request->string('preview_token');
+
+        $payload = Cache::get($this->previewCacheKey($tenantId, $token));
+        if ($payload === null) {
+            return response()->json([
+                'message' => 'Preview has expired. Please re-upload the file.',
+                'errors' => ['preview_token' => ['Preview expired.']],
+            ], 410);
+        }
+
+        $approvedOwners = (array) $request->input('approved_owner_keys', []);
+        $approvedProperties = (array) $request->input('approved_property_keys', []);
+
+        $result = $this->importer->commit(
+            $tenantId,
+            $payload,
+            $approvedOwners,
+            $approvedProperties,
+        );
+
+        Cache::forget($this->previewCacheKey($tenantId, $token));
+
+        return response()->json([
+            'message' => sprintf(
+                'Imported %d listing%s (%d owners created, %d properties created, %d skipped).',
+                $result['listings_created'],
+                $result['listings_created'] === 1 ? '' : 's',
+                $result['owners_created'],
+                $result['properties_created'],
+                $result['rows_skipped'],
+            ),
+            'data' => $result,
+        ], 201);
+    }
+
+    private function previewCacheKey(string $tenantId, string $token): string
+    {
+        return "listing:bulk-preview:{$tenantId}:{$token}";
+    }
+
+    private function csvField(string $value): string
+    {
+        if (str_contains($value, ',') || str_contains($value, '"') || str_contains($value, "\n")) {
+            return '"'.str_replace('"', '""', $value).'"';
+        }
+
+        return $value;
+    }
 }

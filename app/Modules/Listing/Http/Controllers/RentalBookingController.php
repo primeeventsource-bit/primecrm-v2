@@ -7,14 +7,20 @@ namespace App\Modules\Listing\Http\Controllers;
 use App\Core\Shared\TenantContext;
 use App\Modules\Booking\Domain\Models\Booking;
 use App\Modules\Listing\Application\Services\BookingNotifier;
+use App\Modules\Listing\Application\Services\RentalBookingCsvParser;
+use App\Modules\Listing\Application\Services\RentalBookingImporter;
 use App\Modules\Listing\Domain\Enums\ListingStatus;
 use App\Modules\Listing\Domain\Models\Listing;
+use App\Modules\Listing\Http\Requests\RentalBookingBulkImportRequest;
+use App\Modules\Listing\Http\Requests\RentalBookingBulkPreviewRequest;
 use App\Modules\Listing\Http\Requests\StoreRentalBookingRequest;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -39,6 +45,8 @@ final class RentalBookingController extends Controller
     public function __construct(
         private readonly TenantContext $tenantContext,
         private readonly BookingNotifier $notifier,
+        private readonly RentalBookingCsvParser $parser,
+        private readonly RentalBookingImporter $importer,
     ) {}
 
     public function index(Request $request): JsonResponse
@@ -416,5 +424,125 @@ final class RentalBookingController extends Controller
             'all' => [null, null],
             default => [$now->startOfMonth(), $now->endOfMonth()],
         };
+    }
+
+    /* ----------------------------------------------------------------
+     | Bulk import (CSV / Excel)
+     | ----------------------------------------------------------------
+     | Strict: rows must match an existing listing to import. There's
+     | no auto-create — making a listing from a booking row would be
+     | too lossy (no asking price, no commission %, no marketing
+     | description). Operator can use the Listings bulk import to
+     | create the listings first, then re-upload the bookings file.
+     */
+
+    public function template(): Response
+    {
+        $headers = [
+            'listing_id',
+            'owner_email', 'owner_phone',
+            'resort_name', 'city', 'state',
+            'listing_check_in_date',
+            'renter_name', 'renter_email', 'renter_phone',
+            'check_in_date', 'check_out_date',
+            'total_price', 'commission_pct', 'payment_status',
+        ];
+        $examples = [
+            // Direct listing_id path — fastest when you have it.
+            ['00000000-0000-0000-0000-000000000000',
+                '', '', '', '', '', '',
+                'Alice Renter', 'alice@example.com', '+15555550199',
+                '', '', '2450.00', '15', 'paid_in_full'],
+            // Owner+resort+date path — typical for partner exports.
+            ['',
+                'jane.doe@example.com', '', 'Marriott Newport Coast Villas',
+                'Newport Beach', 'CA', '2026-07-04',
+                'Bob Renter', 'bob@example.com', '',
+                '2026-07-04', '2026-07-11',
+                '2950.00', '', 'deposit_paid'],
+        ];
+
+        $lines = [implode(',', $headers)];
+        foreach ($examples as $row) {
+            $lines[] = implode(',', array_map(fn ($v) => $this->csvField((string) $v), $row));
+        }
+
+        return response(implode("\n", $lines)."\n", 200, [
+            'Content-Type' => 'text/csv; charset=utf-8',
+            'Content-Disposition' => 'attachment; filename="bookings-template.csv"',
+        ]);
+    }
+
+    public function bulkPreview(RentalBookingBulkPreviewRequest $request): JsonResponse
+    {
+        $tenantId = $this->tenantContext->id();
+        $parsed = $this->parser->parse($request->file('file'));
+        $resolved = $this->importer->resolveAgainstTenant($tenantId, $parsed);
+
+        $token = (string) Str::uuid();
+        Cache::put(
+            $this->previewCacheKey($tenantId, $token),
+            $resolved,
+            now()->addMinutes(30),
+        );
+
+        return response()->json([
+            'preview_token' => $token,
+            'summary' => $resolved['summary'],
+            'rows' => $resolved['rows'],
+        ]);
+    }
+
+    public function bulkImport(RentalBookingBulkImportRequest $request): JsonResponse
+    {
+        $tenantId = $this->tenantContext->id();
+        $token = (string) $request->string('preview_token');
+
+        $payload = Cache::get($this->previewCacheKey($tenantId, $token));
+        if ($payload === null) {
+            return response()->json([
+                'message' => 'Preview has expired. Please re-upload the file.',
+                'errors' => ['preview_token' => ['Preview expired.']],
+            ], 410);
+        }
+
+        // Default: don't notify on bulk import. Historical-back-fill
+        // is the common case and the owners already know about those
+        // rentals. Operator can opt in explicitly.
+        $notify = $request->boolean('notify_owners', false);
+
+        $result = $this->importer->commit(
+            $tenantId,
+            $payload,
+            $notify,
+            $request->user(),
+        );
+
+        Cache::forget($this->previewCacheKey($tenantId, $token));
+
+        return response()->json([
+            'message' => sprintf(
+                'Imported %d booking%s (%d skipped, %d owners notified).',
+                $result['bookings_created'],
+                $result['bookings_created'] === 1 ? '' : 's',
+                $result['rows_skipped'],
+                $result['owners_notified'],
+            ),
+            'data' => $result,
+        ], 201);
+    }
+
+    private function previewCacheKey(string $tenantId, string $token): string
+    {
+        return "rental-booking:bulk-preview:{$tenantId}:{$token}";
+    }
+
+    private function csvField(string $value): string
+    {
+        if (str_contains($value, ',') || str_contains($value, '"') || str_contains($value, "\n")) {
+            return '"'.str_replace('"', '""', $value).'"';
+        }
+
+        return $value;
     }
 }
