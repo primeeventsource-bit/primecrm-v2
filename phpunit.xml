@@ -24,18 +24,24 @@
         <env name="CACHE_STORE" value="array"/>
 
         <!--
-        Tests run against a real PostgreSQL database — the production schema
-        depends on partial unique indexes, JSONB columns, and FILTER aggregates
-        that have no faithful equivalent in SQLite. Spin up the test DB once via
-        docker compose and Laravel will recreate the schema per-test class:
+        Tests run against MySQL 8 — matches the production deployment on
+        Laravel Cloud (`db:show` reports MySQL 8.0.39). Spin up the test
+        DB via docker compose and Laravel will recreate the schema
+        per-test class:
 
-            docker compose exec postgres createdb -U crm crm_test
+            docker compose exec mysql mysql -uroot -e "CREATE DATABASE crm_test;"
+            docker compose exec mysql mysql -uroot -e "GRANT ALL ON crm_test.* TO 'crm'@'%';"
 
         CI uses identical settings (just override host/credentials).
+
+        SQLite override: set DB_CONNECTION=sqlite + DB_DATABASE=:memory:
+        in the running shell to run the unit suite without a DB server.
+        Some feature tests (the HoldService MySQL GET_LOCK path, schema
+        JSON casting) will skip or behave differently on sqlite.
         -->
-        <env name="DB_CONNECTION" value="pgsql"/>
+        <env name="DB_CONNECTION" value="mysql"/>
         <env name="DB_HOST" value="127.0.0.1"/>
-        <env name="DB_PORT" value="5432"/>
+        <env name="DB_PORT" value="3306"/>
         <env name="DB_DATABASE" value="crm_test"/>
         <env name="DB_USERNAME" value="crm"/>
         <env name="DB_PASSWORD" value=""/>

@@ -1,6 +1,8 @@
 # Prime CRM — Call Center Platform
 
-Production-grade CRM for vacation rental / timeshare call center sales. Modular monolith on Laravel 11, Vue 3 + Inertia, PostgreSQL, Redis, Twilio, Stripe.
+Production-grade CRM for vacation rental / timeshare call center sales. Modular monolith on Laravel 11, Vue 3 + Inertia, MySQL 8, Redis, Twilio, Stripe.
+
+> **Database choice — history**: this repo was originally architected for PostgreSQL (partial unique indexes, advisory locks, JSONB+GIN). The project moved to MySQL on 2026-05-09; the migrations are MySQL-safe and `HoldService` dispatches advisory locks per driver. A few sections below still describe the original Postgres-leaning design with notes on what the MySQL deployment actually does.
 
 **Build complete (5/5).** Vue 3 + Inertia frontend (dialer console, supervisor war room, pipeline, booking search, payment capture), real-time broadcasting on top of the domain event bus, k6 load tests for the three load-bearing surfaces (agent sessions, compliance gate, webhook flood), CI workflow, and a deployment runbook.
 
@@ -46,12 +48,12 @@ Each module follows DDD-flavored layering: `Domain/` (entities, enums, events), 
 
 ### Database schema (complete — all tables)
 - **Tenants & users**: multi-tenant root, role-aware users, sessions, password resets
-- **Leads**: phone-hashed for fast DNC matching, source tracking, vacation-rental fields, partial unique index for soft-delete-safe dedup
+- **Leads**: phone-hashed for fast DNC matching, source tracking, vacation-rental fields. App-level `LeadDedupService` enforces soft-delete-safe phone uniqueness (the original Postgres partial unique index `… WHERE deleted_at IS NULL` is conditional on `pgsql` in the migration; MySQL relies on the service)
 - **Lead imports**: batch tracking with rollback metadata
 - **Compliance**: `dnc_entries` (hash-indexed, federal/state/wireless/internal), `consent_records` (TCPA express consent), `contact_attempts` (frequency caps), `calling_windows` (per-jurisdiction time-of-day rules)
 - **Call center**: `calls`, `call_events` (append-only state log), `dial_sessions`, `agent_statuses`, `campaigns`
 - **Sales**: `deals` with multi-closer split fields, SNR/VD deductions (Prime CRM compatible), `deal_stage_transitions`
-- **Booking**: `resorts`, `inventory_units`, `inventory_availability`, `inventory_holds`, `bookings` — with a partial unique index on inventory to make double-booking impossible at the DB level
+- **Booking**: `resorts`, `inventory_units`, `inventory_availability`, `inventory_holds`, `bookings`. Double-booking prevention is now in-transaction (row lock + status check) on MySQL; the original Postgres partial unique index was the strongest backstop and is reinstalled automatically on `pgsql` deployments
 - **Payment**: `payments` with parent linkage for refunds/chargebacks, `contracts`, `webhook_events` for idempotent provider event handling
 - **Commission**: event-sourced — `commission_events` (immutable), `commission_calculations` (derived, reversible), `commission_plans/rules/assignments`, `commission_payouts`, `commission_adjustments`
 - **Audit log**: immutable `audit_logs` for every sensitive action
@@ -110,7 +112,7 @@ docker compose exec app composer test            # full Pest suite
 docker compose exec app vendor/bin/pest --filter=Compliance   # just the compliance specs
 ```
 
-Tests run against the same Postgres instance as dev, on a separate `crm_test` database. The `RefreshDatabase` trait re-creates the schema per test class. Tests that exercise the dialer (PacingEngine, AgentPresenceService, LeadQueueService) also need Redis — Redis logical DB 15 (`REDIS_DIALER_DB=15`) is reserved for tests so dev data isn't clobbered.
+Tests run against the same MySQL instance as dev, on a separate `crm_test` database. The `RefreshDatabase` trait re-creates the schema per test class. Tests that exercise the dialer (PacingEngine, AgentPresenceService, LeadQueueService) also need Redis — Redis logical DB 15 (`REDIS_DIALER_DB=15`) is reserved for tests so dev data isn't clobbered.
 
 ---
 
@@ -122,11 +124,11 @@ Tests run against the same Postgres instance as dev, on a separate `crm_test` da
 
 - **Call state machine** — [`CallStateService`](app/Modules/CallCenter/Application/Services/CallStateService.php) owns every transition: `markInitiated` / `markRinging` / `markAnswered` / `markEnded` / `setDisposition`. Each transition appends a row to `call_events` with an `idempotency_key` (Twilio CallSid + status) and updates the `calls` row atomically. The unique constraint on `call_events.idempotency_key` is what protects against Twilio's webhook retries — duplicate writes raise a constraint violation that the service swallows silently.
 
-- **Agent presence** — [`AgentPresenceService`](app/Modules/CallCenter/Application/Services/AgentPresenceService.php) keeps a Postgres row + Redis hash in sync. The Postgres row is the durable source of truth; Redis (logical DB 2, the `dialer` connection) is the hot path the predictive engine reads on every pacing tick. If Redis loses state, `listAvailable()` rewarms from Postgres. Every transition emits `AgentStatusChanged` and writes an audit log entry.
+- **Agent presence** — [`AgentPresenceService`](app/Modules/CallCenter/Application/Services/AgentPresenceService.php) keeps a MySQL row + Redis hash in sync. The MySQL row is the durable source of truth; Redis (logical DB 2, the `dialer` connection) is the hot path the predictive engine reads on every pacing tick. If Redis loses state, `listAvailable()` rewarms from MySQL. Every transition emits `AgentStatusChanged` and writes an audit log entry.
 
 - **Webhook idempotency** — [`WebhookEventStore`](app/Modules/CallCenter/Application/Services/WebhookEventStore.php). The `(provider, external_id)` unique constraint on `webhook_events` is the structural guarantee. The store wraps that with the lifecycle: `received` → `processing` → `processed` (or `failed`). The HTTP webhook controller does the absolute minimum (verify signature, ingest, dispatch job, 200 OK) and gets out of Twilio's retry budget fast.
 
-- **Twilio webhooks** — [`TwilioWebhookController`](app/Modules/CallCenter/Http/Controllers/TwilioWebhookController.php) handles three endpoints (no auth, signature-verified): `/webhooks/twilio/voice/{callId}` returns TwiML to bridge the call to the assigned agent's softphone client; `/webhooks/twilio/status/{callId}` and `/webhooks/twilio/recording/{callId}` ingest to `webhook_events` and dispatch [`ProcessTwilioStatusWebhookJob`](app/Modules/CallCenter/Application/Jobs/ProcessTwilioStatusWebhookJob.php) / [`ProcessTwilioRecordingWebhookJob`](app/Modules/CallCenter/Application/Jobs/ProcessTwilioRecordingWebhookJob.php) on the `webhooks-twilio` queue.
+- **Twilio webhooks** — [`TwilioWebhookController`](app/Modules/CallCenter/Http/Controllers/TwilioWebhookController.php) handles three endpoints (no auth, signature-verified): `/api/webhooks/twilio/voice/{callId}` returns TwiML to bridge the call to the assigned agent's softphone client; `/api/webhooks/twilio/status/{callId}` and `/api/webhooks/twilio/recording/{callId}` ingest to `webhook_events` and dispatch [`ProcessTwilioStatusWebhookJob`](app/Modules/CallCenter/Application/Jobs/ProcessTwilioStatusWebhookJob.php) / [`ProcessTwilioRecordingWebhookJob`](app/Modules/CallCenter/Application/Jobs/ProcessTwilioRecordingWebhookJob.php) on the `webhooks-twilio` queue. All module routes mount under the `api` prefix — Twilio/Stripe dashboards must include it.
 
 - **Recording flow** — [`DownloadCallRecordingJob`](app/Modules/CallCenter/Application/Jobs/DownloadCallRecordingJob.php) streams the recording from Twilio straight into S3 (no full-file PHP buffer). Path shape: `recordings/{tenant_id}/{YYYY}/{MM}/{call_id}.mp3` with optional server-side encryption per `CALL_RECORDING_ENCRYPT`.
 
@@ -151,7 +153,7 @@ if abandon_rate < 0.3 × target_abandon_rate    →  safety_factor *= 1.10
 
 The decision returned is a [`PacingDecision`](app/Modules/Dialer/Domain/ValueObjects/PacingDecision.php) value object carrying every input — agents available, connection rate, abandon rate, raw rate, safety factor, reason — so ops can answer "why did the dialer fire 47 calls just now?" without reading code.
 
-- **Lead queue** — [`LeadQueueService`](app/Modules/Dialer/Application/Services/LeadQueueService.php) is a Redis sorted set per campaign (key: `tenant:{tenantId}:campaign:{campaignId}:leadq`). Score = lead.score; `ZPOPMAX` is the atomic pick. Refilled in batches from Postgres when depth drops below threshold. Atomic pop scales to thousands of agents — a Postgres `SELECT … FOR UPDATE SKIP LOCKED` pattern serializes the dialer.
+- **Lead queue** — [`LeadQueueService`](app/Modules/Dialer/Application/Services/LeadQueueService.php) is a Redis sorted set per campaign (key: `tenant:{tenantId}:campaign:{campaignId}:leadq`). Score = lead.score; `ZPOPMAX` is the atomic pick. Refilled in batches from MySQL when depth drops below threshold. Atomic pop scales to thousands of agents — a MySQL `SELECT … FOR UPDATE SKIP LOCKED` pattern (supported since 8.0) serializes the dialer.
 
 - **Session lifecycle** — [`DialerService`](app/Modules/Dialer/Application/Services/DialerService.php) handles `start` / `pause` / `resume` / `stop`, flipping agent presence in lockstep. Refuses to create a duplicate session if the agent already has one active (returns the existing one).
 
@@ -188,9 +190,10 @@ POST   /api/dialer/sessions/{id}/stop
 POST   /api/dialer/sessions/{id}/dial-now  click-to-call (still gated by guardrail)
 
 # Twilio webhooks (PUBLIC, signature-verified)
-POST   /webhooks/twilio/voice/{callId}     TwiML → <Dial><Client>agent-{id}</Client></Dial>
-POST   /webhooks/twilio/status/{callId}    status callbacks
-POST   /webhooks/twilio/recording/{callId} recording status
+# NB: module routes mount under /api — Twilio dashboards must use the /api/ prefix.
+POST   /api/webhooks/twilio/voice/{callId}     TwiML → <Dial><Client>agent-{id}</Client></Dial>
+POST   /api/webhooks/twilio/status/{callId}    status callbacks
+POST   /api/webhooks/twilio/recording/{callId} recording status
 ```
 
 ### Tests (Response 3 additions)
@@ -201,7 +204,7 @@ POST   /webhooks/twilio/recording/{callId} recording status
 - `Feature/Dialer/DialerSessionLifecycleTest` — start/pause/resume/stop and the corresponding Available/OnBreak/Offline transitions.
 - `Feature/CallCenter/WebhookIdempotencyTest` — duplicate Twilio webhooks produce one `webhook_events` row and one `call_events` row; bad signatures get 403; valid signatures route to the right job.
 - `Feature/CallCenter/CallStateTransitionsTest` — every transition; refuses to downgrade in_progress → ringing on out-of-order webhooks; idempotent re-application via `idempotency_key`.
-- `Feature/CallCenter/AgentPresenceTest` — Postgres + Redis stay in sync; rewarm-from-Postgres works after a Redis flush; every transition writes an audit log row.
+- `Feature/CallCenter/AgentPresenceTest` — MySQL + Redis stay in sync; rewarm-from-MySQL works after a Redis flush; every transition writes an audit log row.
 
 `tests/Support/FakeTelephonyProvider` is the test double — bound via the container so feature tests can capture every call placed, control signature verification, and force provider failures.
 
@@ -236,17 +239,22 @@ Per-campaign overrides live on `campaigns` (target_abandon_rate, safety_factor, 
 
 ### Sales module
 
-- [Deal](app/Modules/Sales/Domain/Models/Deal.php) — multi-closer aware (`agent_id` primary closer, `fronter_id`, `additional_closer_ids` jsonb), with SNR/VD deductions and a derived `payable_amount` that's the base for commission percentages.
+- [Deal](app/Modules/Sales/Domain/Models/Deal.php) — multi-closer aware (`agent_id` primary closer, `fronter_id`, `additional_closer_ids` json), with SNR/VD deductions and a derived `payable_amount` that's the base for commission percentages.
 - [DealStageTransition](app/Modules/Sales/Domain/Models/DealStageTransition.php) — append-only history; mirrors the call_events pattern.
 - [DealService::advanceStage](app/Modules/Sales/Application/Services/DealService.php) writes the transition row + updates the deal atomically; emits `DealStageChanged` always and `DealClosedWon` when reaching ClosedWon. The Commission module subscribes.
 - HTTP: `GET/POST /api/deals`, `GET /api/deals/{id}`, `POST /api/deals/{id}/advance-stage`.
 
-### Booking module — double-booking impossible at the DB level
+### Booking module — double-booking prevented at the DB level
 
-The strongest structural guarantee in this response. Two layers of defense:
+The strongest structural guarantee in this response. Two layers of defense, both engine-aware:
 
-1. **Postgres advisory lock** in [HoldService::hold](app/Modules/Booking/Application/Services/HoldService.php) — `pg_advisory_xact_lock(hashtextextended('{unitId}:{checkInDate}', 0))`. Auto-released at end of transaction. Serializes simultaneous hold attempts on the same week.
-2. **Partial unique index** (in the existing schema): `CREATE UNIQUE INDEX inventory_availability_one_active ON inventory_availability (inventory_unit_id, check_in_date) WHERE status IN ('available', 'held', 'booked')`. The structural backstop. If anything slips past the lock (cross-transaction race, replication lag), the index makes the second commit fail with 23505. The `HoldService` catches `UniqueConstraintViolationException` and raises `InventoryUnavailableException` so callers see a domain-language error.
+1. **Engine-aware advisory lock** in [HoldService::hold](app/Modules/Booking/Application/Services/HoldService.php). The lock is acquired outside the transaction and released in `finally`:
+   - **MySQL** (production): `GET_LOCK('hold:{md5}', 5)` + matching `RELEASE_LOCK`. 5-second timeout — under contention spikes, callers fall through to step 2 instead of immediately raising.
+   - **Postgres**: `pg_advisory_lock(hashtextextended(...))` + matching `pg_advisory_unlock`. Session-scoped to keep the acquire/release shape uniform with MySQL.
+   - **SQLite** (tests): no-op. SQLite serializes writes anyway.
+2. **Row lock + state check** inside the transaction: `InventoryAvailability::query()->lockForUpdate()->find(...)` then `isAvailable()`. This is the structural race guard that holds on every engine — the advisory lock just shortens the contention window. If two requests race past the advisory lock, only one's `isAvailable()` check returns true; the other raises `InventoryUnavailableException`.
+
+> The original architecture relied on a Postgres-only partial unique index (`WHERE status IN ('available','held','booked')`) as the structural backstop. MySQL doesn't support partial unique indexes; the row lock + status check above is the MySQL-compatible replacement. `HoldService` still catches `UniqueConstraintViolationException` for any environment that reintroduces the index.
 
 [DoubleBookingPreventionTest](tests/Feature/Booking/DoubleBookingPreventionTest.php) locks this in: two agents racing on the same availability row → exactly one wins, the other gets a 409. After release, the second agent can hold cleanly.
 
@@ -254,7 +262,7 @@ Hold lifecycle:
 - Hold created → `inventory_availability.status = 'held'`, `current_hold_id` stamped, expires_at set per resort.hold_ttl_minutes
 - Hold expired (sweep) → status back to 'available'; [ExpireInventoryHoldsJob](app/Modules/Booking/Application/Jobs/ExpireInventoryHoldsJob.php) scheduled every minute
 - Hold converted to booking → status to 'booked', hold released with reason='converted'
-- Booking cancelled → original availability row marked 'cancelled' (outside the partial unique index), fresh 'available' row inserted for the same unit/date so it can be rebooked. Booking history preserved.
+- Booking cancelled → original availability row marked 'cancelled', fresh 'available' row inserted for the same unit/date so it can be rebooked. Booking history preserved.
 
 [BookingService](app/Modules/Booking/Application/Services/BookingService.php) generates a customer-friendly confirmation number (`BK-XXXXXXXX`, alphabet excludes I/O/0/1).
 
@@ -270,7 +278,7 @@ API: `GET /api/inventory/search`, `POST /api/inventory/holds`, `DELETE /api/inve
 - Handled events: `payment_intent.succeeded` (sets `cleared_at`, fires `PaymentCleared`), `payment_intent.payment_failed`, `charge.dispute.created` (fires `ChargebackOccurred`), `charge.refunded` (no-op confirmation since we already wrote the row).
 - **Critical: `cleared_at` is the commission trigger**, not authorization. The Commission module only pays on settled funds, not pending intents.
 
-API: `GET/POST /api/payments`, `POST /api/payments/charge`, `POST /api/payments/{id}/refund` (supervisor-only), `POST /webhooks/stripe` (public, signature-verified).
+API: `GET/POST /api/payments`, `POST /api/payments/charge`, `POST /api/payments/{id}/refund` (supervisor-only), `POST /api/webhooks/stripe` (public, signature-verified).
 
 ### Commission module — event-sourced, reversible, audit-preserving
 
@@ -286,7 +294,7 @@ The hardest part is that commissions accrue on cleared payments but **chargeback
    - `flat`: `config.amount`
    - `percentage`: `config.rate × payload[config.base_field]`
    - `tiered`: brackets `[{up_to, rate}]`. Two modes — flat (matching tier rate × whole base) and `marginal=true` (true marginal split across brackets). `2000 × 0.05 + 3000 × 0.08 + 2000 × 0.12 = 580` on a $7000 base.
-5. Persist as `commission_calculations` with explanation jsonb (rule type, math trace) so agents can answer "why is my commission $237?" without engineering help. Status defaults to `payable` for `payment.cleared` events, `pending` for `deal.closed_won`.
+5. Persist as `commission_calculations` with explanation json (rule type, math trace) so agents can answer "why is my commission $237?" without engineering help. Status defaults to `payable` for `payment.cleared` events, `pending` for `deal.closed_won`.
 
 **Reversal path** — [CommissionEngine::reverseFromEvent](app/Modules/Commission/Application/Services/CommissionEngine.php):
 1. Find the original event by `idempotency_key` (e.g. `payment.cleared:{payment_id}`).
@@ -337,7 +345,7 @@ Booking confirmed (R4 — POST /api/bookings/from-hold/{id})
   ↓
 Payment charged (R4 — POST /api/payments/charge)
   ↓
-Stripe payment_intent.succeeded webhook (R4 — POST /webhooks/stripe)
+Stripe payment_intent.succeeded webhook (R4 — POST /api/webhooks/stripe)
   ↓ webhook_events idempotent ingest
 PaymentCleared event fires
   ↓ OnPaymentClearedListener
@@ -447,7 +455,7 @@ Setup, runbook, and failure-mode interpretation in [tests/load/README.md](tests/
 
 ### CI + deployment
 
-- [.github/workflows/ci.yml](.github/workflows/ci.yml) — Postgres + Redis service containers, Pint + Pest + Vite build on every PR
+- [.github/workflows/ci.yml](.github/workflows/ci.yml) — MySQL 8 + Redis service containers, Pint + Pest + Vite build on every PR
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — Laravel Cloud, self-host Docker, and CI guidance + ops runbooks (federal DNC import, dialer pause, webhook replay, payout rebuild)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module dependency graph, the five structural properties, queue + Redis topology, where to add new features
 
@@ -463,10 +471,15 @@ Setup, runbook, and failure-mode interpretation in [tests/load/README.md](tests/
 - Federal calling-window default ([BaseCallingWindowsSeeder](database/seeders/BaseCallingWindowsSeeder.php)) — required for the guardrail; seeded by `db:seed` even without `DemoSeeder`
 
 ```
-admin@demo.test       supervisor@demo.test       qa@demo.test
-closer1@demo.test     closer2@demo.test          closer3@demo.test
-fronter1@demo.test    fronter2@demo.test
-                                                    password: password
+admin@demo.test       Robert Hayes    (admin — full access)
+supervisor@demo.test  Priya Anand     (supervisor — war room, dnc)
+qa@demo.test          Lin Wei         (qa)
+sofia@demo.test       Sofia Cruz      (top closer — has deals/payments)
+marcus@demo.test      Marcus Webb     (closer)
+jamie@demo.test       Jamie Rivera    (closer)
+devon@demo.test       Devon Park      (fronter)
+alex@demo.test        Alex Chen       (fronter)
+                                       password: password
 ```
 
 ### Required external accounts before going live
@@ -481,7 +494,10 @@ fronter1@demo.test    fronter2@demo.test
 
 **Why modular monolith, not microservices.** Call center workflows are heavily transactional and cross-module: a call references a lead, creates a deal, holds inventory, takes a payment, generates a commission event, and writes audit logs — all in one human session. Network hops between services here means saga complexity, eventual consistency on workflows that need to be immediate, and 10× the operational surface. We get most of the modularity benefits with one deployment unit.
 
-**Why PostgreSQL over MySQL.** Three things we use that MySQL can't match: partial unique indexes (the double-booking prevention; the soft-delete-safe lead phone uniqueness), JSONB with GIN indexes (lead source metadata, sentiment timelines, audit log changes), and advisory locks (used in Response 4 for hold acquisition). All are central enough to make Postgres the right call.
+**Why MySQL (was Postgres).** The original design picked Postgres for three things MySQL didn't match cleanly: partial unique indexes (double-booking prevention; soft-delete-safe lead phone uniqueness), JSONB with GIN indexes (lead source metadata, sentiment timelines, audit log changes), and advisory locks (hold acquisition). The project moved to MySQL 8 on 2026-05-09 (operational reasons), and each of those got an engine-portable replacement:
+- Partial unique indexes → row-lock-plus-status-check inside the transaction (see the Booking module section). The `HoldService` still catches `UniqueConstraintViolationException` so the index can be reintroduced on engines that support it without code changes.
+- JSONB + GIN → MySQL 8 `json` columns with functional indexes where the query plan needs them. The query shape is unchanged; GIN's wide-key scans aren't on a hot path in this app.
+- Advisory locks → `HoldService::acquireAdvisoryLock` dispatches per driver: `pg_advisory_lock` on Postgres, `GET_LOCK`/`RELEASE_LOCK` on MySQL, no-op on SQLite. Returns a release closure the caller invokes in `finally`.
 
 **Why Vue 3 + Inertia, not Livewire.** The dialer UI has 6+ independent real-time data sources (call state, timer, agent status, lead queue, supervisor whisper events, script position). Livewire's full-component re-render model fights this — you end up using Alpine for everything anyway. Supervisor dashboards with 50+ live agent tiles updating concurrently hit Livewire's serialization overhead. Inertia gives us SPA snappiness with Laravel's routing/auth. Livewire stays a great fit for CRUD-heavy screens (Prime CRM payroll, settings) but is the wrong tool for a softphone.
 
@@ -526,7 +542,7 @@ The pre-dial pipeline runs four gates in order, each independent and final:
 1. **Lead state** — flagged DNC, terminal status, missing phone (cheap, no I/O)
 2. **DNC** (`DncCheckService`) — single indexed lookup against `dnc_entries` joining tenant-scoped + global (federal/state/wireless) lists. Severity ranking picks the most serious match for reporting.
 3. **Consent** (`ConsentCheckService`) — express written consent required for autodialer/predictive/progressive modes; manual mode has a softer bar. Detects revoked consent.
-4. **Frequency cap** (`FrequencyCapService`) — single PostgreSQL `COUNT(*) FILTER` aggregate covering cooldown (default 4h), daily cap (default 3), and 30-day cap (default 7). All three windows in one indexed query.
+4. **Frequency cap** (`FrequencyCapService`) — three conditional aggregates over `contact_attempts` covering cooldown (default 4h), daily cap (default 3), and 30-day cap (default 7). Originally written as a single Postgres `COUNT(*) FILTER` aggregate; the MySQL port uses three `SUM(CASE WHEN … THEN 1 ELSE 0 END)` expressions in the same query, against the same composite index.
 5. **Calling window** (`CallingWindowService`) — TCPA 8am-9pm local time at the called party's location. Timezone resolution: `lead.timezone` → area code lookup (NANP map covering US/Canada) → tenant default → UTC. Per-jurisdiction state overrides via `calling_windows`. Cached 5 min so dialing doesn't hammer the rules table.
 
 **Decision shape**: `GuardrailDecision` value object — `allowed: bool`, `rejection_code` enum (`dnc_federal`, `consent_revoked`, `frequency_daily_cap`, `outside_calling_window`, …), human reason, structured metadata. Rejections audit-log themselves and emit `LeadRejectedByCompliance`.
@@ -570,7 +586,7 @@ Pest test suite for the new code:
 - `Feature/Lead/` — dedup tiers (phone exact, email exact, fuzzy with co-signal), HTTP CRUD + import, assignment modes, capacity guards, hot-lead short-circuit, manual reassignment
 - `Feature/Compliance/` — every guardrail rejection path (DNC federal/wireless, missing/revoked consent, frequency cooldown/daily cap, outside calling window, terminal status), federal DNC delta import (idempotency), consent revocation flag-flipping
 
-Tests run against a real PostgreSQL DB — the schema uses partial unique indexes, JSONB, and `FILTER` aggregates that have no faithful SQLite equivalent. See [Running tests](#running-tests) below.
+Tests run against MySQL 8 (matches production). The schema uses MySQL `json` columns and conditional-sum aggregates; some tests will skip on SQLite. See [Running tests](#running-tests) below.
 
 ---
 
@@ -581,7 +597,7 @@ This repo is structured to deploy to [Laravel Cloud](https://cloud.laravel.com) 
 ### One-time setup
 
 1. **Create the app** in Cloud's UI from this repo (`primeeventsource-bit/PrimeCRM-v2`, branch `main`).
-2. **Attach a Postgres database** and a **Redis (KeyDB)** instance — Cloud injects `DB_HOST`/`DB_PASSWORD`/`REDIS_HOST`/`REDIS_PASSWORD` automatically.
+2. **Attach a MySQL 8 database** and a **Redis (KeyDB)** instance — Cloud injects `DB_HOST`/`DB_PASSWORD`/`REDIS_HOST`/`REDIS_PASSWORD` automatically.
 3. **Generate `APP_KEY`**: in Cloud's env editor add `APP_KEY=` and click "Generate", or paste output of `php artisan key:generate --show`.
 
 ### Required environment variables (set in Cloud's UI)
@@ -592,8 +608,8 @@ This repo is structured to deploy to [Laravel Cloud](https://cloud.laravel.com) 
 | `APP_DEBUG` | `false` | |
 | `APP_URL` | `https://<your-cloud-domain>` | Cloud assigns this |
 | `APP_KEY` | `base64:...` | generate once, never rotate without re-encrypting sessions |
-| `DB_CONNECTION` | `pgsql` | |
-| `DB_SSLMODE` | `require` | Cloud's managed Postgres requires TLS |
+| `DB_CONNECTION` | `mysql` | Cloud-attached MySQL 8 |
+| `DB_PORT` | `3306` | MySQL default |
 | `OCTANE_SERVER` | `frankenphp` | the default; Swoole is not available on Cloud |
 | `OCTANE_HTTPS` | `true` | Cloud terminates TLS at the edge |
 | `QUEUE_CONNECTION` | `redis` | |

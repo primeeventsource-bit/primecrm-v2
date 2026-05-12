@@ -57,8 +57,17 @@ These properties are enforced by the schema or the type system, not by
 - Test: `WebhookIdempotencyTest`, `StripeWebhookIdempotencyTest`.
 
 ### 4. Double-booking prevention
-- Two layers: Postgres `pg_advisory_xact_lock` per (unit, check_in_date),
-  plus the partial unique index `inventory_availability_one_active`.
+- Two layers, both engine-aware in [HoldService](../app/Modules/Booking/Application/Services/HoldService.php):
+  1. Advisory lock per (unit, check_in_date) — `pg_advisory_lock` on Postgres,
+     `GET_LOCK` on MySQL (production), no-op on SQLite. Acquired outside the
+     transaction and released in `finally`. 5-second MySQL timeout means
+     callers fall through to layer 2 instead of hanging under contention.
+  2. `lockForUpdate()` on the `inventory_availability` row inside the
+     transaction, followed by an `isAvailable()` status check. Race-safe
+     on every engine. (The Postgres partial unique index
+     `inventory_availability_one_active` was removed when the project moved
+     to MySQL; `UniqueConstraintViolationException` is still caught so the
+     index can be reintroduced without code changes.)
 - Test: `DoubleBookingPreventionTest`.
 
 ### 5. Append-only commission accounting
