@@ -103,9 +103,20 @@ function summarizeConfig(r: Rule): string {
     return JSON.stringify(c);
 }
 
-function onPlanSaved(): void {
+async function onPlanSaved(payload: { newPlanId: string | null }): Promise<void> {
     planModalOpen.value = false;
-    void load();
+    await load();
+
+    // For a brand-new plan, chain straight into "add your first rule".
+    // A plan without rules pays out nothing — surfacing the rule form
+    // here means the operator can't accidentally end the flow with a
+    // half-configured plan.
+    if (payload.newPlanId !== null) {
+        expanded.value = { ...expanded.value, [payload.newPlanId]: true };
+        ruleModalPlanId.value = payload.newPlanId;
+        editingRule.value = null;
+        ruleModalOpen.value = true;
+    }
 }
 
 function onRuleSaved(): void {
@@ -147,7 +158,12 @@ onMounted(load);
             </div>
 
             <div v-else class="space-y-3">
-                <div v-for="p in plans" :key="p.id" class="panel overflow-hidden">
+                <div
+                    v-for="p in plans"
+                    :key="p.id"
+                    class="panel overflow-hidden"
+                    :class="p.rules.length === 0 ? 'ring-1 ring-amber-300/40' : ''"
+                >
                     <div class="flex items-center justify-between gap-3 px-4 py-3">
                         <button
                             class="flex items-center gap-2 text-left"
@@ -161,10 +177,22 @@ onMounted(load);
                             >
                                 {{ p.active ? 'active' : 'inactive' }}
                             </span>
+                            <!-- Zero-rule plans pay nothing — surface a loud badge so the
+                                 operator can't mistake an empty plan for a working one. -->
+                            <span
+                                v-if="p.rules.length === 0"
+                                class="pill bg-amber-100 text-amber-800"
+                                title="This plan has no rules — no commission will be paid until at least one rule is added."
+                            >
+                                ⚠ no rules — pays nothing
+                            </span>
                             <span class="text-xs text-slate-500">
                                 {{ p.effective_from }}<span v-if="p.effective_to"> → {{ p.effective_to }}</span>
                             </span>
-                            <span class="text-xs text-slate-400">· {{ p.rules.length }} rule{{ p.rules.length === 1 ? '' : 's' }}</span>
+                            <span
+                                v-if="p.rules.length > 0"
+                                class="text-xs text-slate-400"
+                            >· {{ p.rules.length }} rule{{ p.rules.length === 1 ? '' : 's' }}</span>
                         </button>
                         <div class="flex items-center gap-2">
                             <button class="btn-ghost text-xs text-slate-600 hover:bg-slate-100" @click="openEditPlan(p)">Edit</button>
@@ -207,7 +235,21 @@ onMounted(load);
                                 </tr>
                             </tbody>
                         </table>
-                        <p v-else class="py-3 text-sm text-slate-500">No rules yet. Add one to make this plan pay out.</p>
+                        <div
+                            v-else
+                            class="my-2 flex items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-3 text-sm text-amber-900"
+                        >
+                            <div>
+                                <div class="font-medium">No rules on this plan yet.</div>
+                                <p class="mt-0.5 text-xs text-amber-800">
+                                    A plan without rules pays nothing — agents assigned to it will earn $0 on every event.
+                                    Add at least one rule (a percentage, flat amount, or tiered schedule) before assigning agents.
+                                </p>
+                            </div>
+                            <button class="btn-primary text-xs whitespace-nowrap" @click="openNewRule(p.id)">
+                                + Add first rule
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>

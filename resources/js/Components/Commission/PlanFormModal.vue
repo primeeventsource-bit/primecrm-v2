@@ -13,7 +13,15 @@ interface PlanInput {
 }
 
 const props = defineProps<{ open: boolean; plan: PlanInput | null }>();
-const emit = defineEmits<{ (e: 'saved'): void; (e: 'close'): void }>();
+const emit = defineEmits<{
+    /**
+     * Plan saved. `newPlanId` is set ONLY on create (not edit) so the
+     * parent can chain into "add your first rule" without re-querying
+     * the plans list to find the row it just created.
+     */
+    (e: 'saved', payload: { newPlanId: string | null }): void;
+    (e: 'close'): void;
+}>();
 
 const form = ref({
     name: '',
@@ -66,10 +74,16 @@ async function submit(): Promise<void> {
     try {
         if (props.plan?.id) {
             await axios.patch(`/api/commission/plans/${props.plan.id}`, payload);
+            emit('saved', { newPlanId: null });
         } else {
-            await axios.post('/api/commission/plans', payload);
+            // PlanController::store returns the serialized plan
+            // directly (no `data` envelope) — see private serialize().
+            const { data } = await axios.post<{ id: string }>(
+                '/api/commission/plans',
+                payload,
+            );
+            emit('saved', { newPlanId: data.id });
         }
-        emit('saved');
     } catch (err: unknown) {
         const e = err as { response?: { data?: { errors?: Record<string, string[]>; error?: string; message?: string } } };
         errors.value = e.response?.data?.errors ?? {};
