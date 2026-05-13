@@ -27,16 +27,9 @@ final class PlanController extends Controller
 
     public function index(Request $request): JsonResponse
     {
-        // Permissive validation. $request->boolean() further down already
-        // coerces 'true'/'false'/'1'/'0'/'on'/'yes'/'' safely; the
-        // stricter 'boolean' rule was rejecting the page's load on every
-        // mount with a 422 (cause: TBD — possibly an axios query-string
-        // shape Laravel's boolean validator doesn't accept). Accepting
-        // anything for these query flags loses nothing — invalid values
-        // simply read as false via boolean().
         $request->validate([
-            'active_only' => ['nullable', 'string'],
-            'with_rules' => ['nullable', 'string'],
+            'active_only' => ['nullable', 'boolean'],
+            'with_rules' => ['nullable', 'boolean'],
         ]);
 
         $query = CommissionPlan::query()->orderBy('name');
