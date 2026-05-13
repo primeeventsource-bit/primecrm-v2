@@ -678,10 +678,19 @@ final class ListingController extends Controller
      *   POST /api/listings/{id}/photos
      *   multipart/form-data with `photo` file part
      *
-     * Stored on the disk named by `filesystems.listing_photos_disk`
-     * (default 'public' for local dev; 'listing_photos' on Cloud,
-     * which is the R2 bucket). The disk's `url()` method produces the
-     * right URL shape for either backend — we never hardcode /storage.
+     * Stored on the `public` disk. On Laravel Cloud the platform
+     * injects `LARAVEL_CLOUD_DISK_CONFIG` at container start and
+     * rewires `filesystems.disks.public` to the project's Default
+     * bucket (R2-backed, public CDN). On local dev with `storage:link`
+     * the same disk writes to `storage/app/public` and reads via
+     * `APP_URL/storage/...`. The disk's `url()` produces the right URL
+     * shape for either backend — we never hardcode /storage.
+     *
+     * (Earlier this method had a configurable `listing_photos_disk`
+     * config key and a parallel `listing_photos` disk — both were
+     * removed once we confirmed Cloud auto-binds the `public` disk to
+     * R2. The custom shape would only return if a deploy target ships
+     * without Cloud's auto-binding.)
      *
      * The `photos` JSON column on the listing holds an ordered list of
      * URLs; we append, never replace. Cap at MAX_PHOTOS so a runaway
@@ -715,7 +724,7 @@ final class ListingController extends Controller
         $filename = Str::uuid()->toString().'.'.strtolower($ext);
         $path = "listings/{$listing->id}/{$filename}";
 
-        $disk = Storage::disk(config('filesystems.listing_photos_disk', 'public'));
+        $disk = Storage::disk('public');
         $disk->putFileAs(
             "listings/{$listing->id}",
             $file,
@@ -769,15 +778,14 @@ final class ListingController extends Controller
             return response()->json(['photos' => $remaining]);
         }
 
-        // Map URL back to disk path. URLs differ by backend (public
-        // disk → APP_URL/storage/...; R2 → bucket-public-url/...) but
-        // we always anchor on the "listings/{id}/" segment to extract
-        // the disk-relative key.
+        // Map URL back to disk path. URLs differ by backend (local
+        // public disk → APP_URL/storage/...; R2 → bucket-public-url/...)
+        // but we always anchor on the "listings/{id}/" segment to
+        // extract the disk-relative key.
         $relative = $this->urlToRelativePath($target, $listing->id);
         if ($relative !== null) {
             try {
-                Storage::disk(config('filesystems.listing_photos_disk', 'public'))
-                    ->delete($relative);
+                Storage::disk('public')->delete($relative);
             } catch (\Throwable) {
                 // File may already be gone; ignore.
             }
