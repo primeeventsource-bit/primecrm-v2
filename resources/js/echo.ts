@@ -19,8 +19,23 @@ declare global {
  *
  * Keeping this in a function (rather than at module scope) means tests
  * that don't need WebSockets can stub or skip the call.
+ *
+ * Empty `key` short-circuits the whole setup. With an empty key the
+ * Pusher client used to keep retrying the WebSocket forever (~1s,
+ * exponential backoff to 32s) — visible as a hundred-plus
+ * `WebSocket connection ... failed` console errors and a network panel
+ * full of failing handshakes. On Cloud envs that haven't been wired to
+ * a broadcasting backend yet, "no realtime" is the correct quiet
+ * fallback; subscribers (`useEcho`, `usePrimeConnectRooms`, etc.)
+ * already null-check `window.Echo`.
  */
-export function initEcho(props: { echo: { host: string; key: string; cluster: string } }): PusherEcho {
+export function initEcho(props: { echo: { host: string; key: string; cluster: string } }): PusherEcho | null {
+    if (!props.echo.key) {
+        // eslint-disable-next-line no-console
+        console.info('[echo] Pusher key not set — skipping realtime WebSocket init.');
+        return null;
+    }
+
     window.Pusher = Pusher;
 
     window.Echo = new Echo({

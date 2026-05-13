@@ -30,6 +30,7 @@ interface Plan {
 
 const plans = ref<Plan[]>([]);
 const loading = ref(false);
+const loadError = ref<string | null>(null);
 const expanded = ref<Record<string, boolean>>({});
 
 const planModalOpen = ref(false);
@@ -41,11 +42,21 @@ const editingRule = ref<Rule | null>(null);
 
 async function load(): Promise<void> {
     loading.value = true;
+    loadError.value = null;
     try {
         const { data } = await axios.get<{ data: Plan[] }>('/api/commission/plans', {
             params: { with_rules: true },
         });
         plans.value = data.data;
+    } catch (err: unknown) {
+        const e = err as {
+            response?: { status?: number; data?: { message?: string; errors?: Record<string, string[]> } };
+        };
+        const msg = e.response?.data?.message
+            ?? Object.values(e.response?.data?.errors ?? {}).flat()[0]
+            ?? `Could not load commission plans (HTTP ${e.response?.status ?? 'unknown'}).`;
+        loadError.value = msg;
+        plans.value = [];
     } finally {
         loading.value = false;
     }
@@ -149,10 +160,16 @@ onMounted(load);
                 @close="ruleModalOpen = false"
             />
 
+            <div v-if="loadError"
+                 class="panel p-4 mb-4 border border-red-200 bg-red-50 text-sm text-red-700">
+                {{ loadError }}
+                <button class="ml-3 underline" @click="void load()">Retry</button>
+            </div>
+
             <div v-if="loading && plans.length === 0" class="panel p-12 text-center text-sm text-slate-500">
                 Loading plans…
             </div>
-            <div v-else-if="plans.length === 0" class="panel p-12 text-center text-sm text-slate-500">
+            <div v-else-if="!loadError && plans.length === 0" class="panel p-12 text-center text-sm text-slate-500">
                 No commission plans yet. Click <b>+ New plan</b> to create one — or run the seeder to backfill defaults
                 (<code>php artisan db:seed --class=CommissionPlansSeeder</code>).
             </div>

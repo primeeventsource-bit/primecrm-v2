@@ -102,6 +102,14 @@ final class AgentPresenceService
     /**
      * Lightweight heartbeat — touches last_heartbeat_at without changing status.
      * Called by the agent UI every few seconds; cheap.
+     *
+     * Redis side is best-effort. The DB update IS the durable presence
+     * record; the Redis mirror is for the supervisor war-room's
+     * sub-second view. On Cloud envs without Redis configured (or when
+     * the dialer connection is down) we skip the Redis half and let the
+     * heartbeat succeed on DB alone. Previously this threw — every
+     * 20-second heartbeat call from every open tab returned a 500,
+     * filling the log and creating the appearance of page instability.
      */
     public function heartbeat(string $agentId): void
     {
@@ -114,11 +122,17 @@ final class AgentPresenceService
             ->where('agent_id', $agentId)
             ->update(['last_heartbeat_at' => now()]);
 
-        Redis::connection('dialer')->hset(
-            $this->presenceKey($tenantId),
-            $agentId.':heartbeat',
-            now()->toIso8601String(),
-        );
+        try {
+            Redis::connection('dialer')->hset(
+                $this->presenceKey($tenantId),
+                $agentId.':heartbeat',
+                now()->toIso8601String(),
+            );
+        } catch (\Throwable) {
+            // Redis unavailable — DB update above is the source of truth.
+            // Don't fail the request; supervisor war-room loses its
+            // sub-second view but heartbeat semantics still hold.
+        }
     }
 
     /**
