@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import axios from 'axios';
 
 /**
@@ -9,6 +9,12 @@ import axios from 'axios';
  * Dates and commission auto-prefill from the listing the moment one
  * is selected; operator can override anything. Owner-payout preview
  * runs client-side using the same formula the server applies.
+ *
+ * Documents (signed agreement, payment proof, guest ID) are STAGED
+ * client-side — the booking doesn't exist yet, so there's no id to
+ * attach them to. On submit we create the booking, then upload each
+ * staged document against the new id before emitting `created`. A
+ * document upload failing does NOT roll back the booking.
  */
 
 interface ListingOption {
@@ -110,9 +116,105 @@ function fmtMoney(n: number | null): string {
     return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+/* ──────────────────────────────────────────────────────────────────────
+ * Document staging — agreement / payment proof / ID / other.
+ *
+ * Files are held in memory with a per-file `kind`. Images get a
+ * thumbnail preview; PDFs render a generic doc tile. Uploaded after
+ * the booking is created.
+ * ──────────────────────────────────────────────────────────────────── */
+const MAX_DOCS = 20;
+type DocKind = 'agreement' | 'payment_proof' | 'id' | 'other';
+const DOC_KIND_LABELS: Record<DocKind, string> = {
+    agreement: 'Rental agreement',
+    payment_proof: 'Payment proof',
+    id: 'Guest ID',
+    other: 'Other',
+};
+interface StagedDoc {
+    file: File;
+    kind: DocKind;
+    /** Object URL for image previews; null for PDFs. */
+    previewUrl: string | null;
+}
+const stagedDocs = ref<StagedDoc[]>([]);
+const docError = ref<string | null>(null);
+const docDragOver = ref(false);
+const docInputEl = ref<HTMLInputElement | null>(null);
+/** 1..N while uploading post-create; 0 when idle. */
+const docUploadIndex = ref(0);
+
+const ACCEPTED_DOC_TYPES = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
+
+function addDocFiles(files: FileList | File[]): void {
+    docError.value = null;
+    const incoming = Array.from(files);
+    for (const file of incoming) {
+        if (stagedDocs.value.length >= MAX_DOCS) {
+            docError.value = `Up to ${MAX_DOCS} documents per booking. Extra files were skipped.`;
+            break;
+        }
+        if (!ACCEPTED_DOC_TYPES.includes(file.type)) {
+            docError.value = `"${file.name}" isn't a PDF or image and was skipped.`;
+            continue;
+        }
+        if (file.size > 10 * 1024 * 1024) {
+            docError.value = `"${file.name}" is over 10MB and was skipped.`;
+            continue;
+        }
+        // Guess the kind from the filename so the operator usually
+        // doesn't have to touch the selector.
+        const lower = file.name.toLowerCase();
+        let kind: DocKind = 'other';
+        if (lower.includes('agreement') || lower.includes('contract')) kind = 'agreement';
+        else if (lower.includes('payment') || lower.includes('receipt') || lower.includes('invoice')) kind = 'payment_proof';
+        else if (lower.includes('id') || lower.includes('license') || lower.includes('passport')) kind = 'id';
+
+        stagedDocs.value.push({
+            file,
+            kind,
+            previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : null,
+        });
+    }
+}
+
+function onDocInputChange(e: Event): void {
+    const input = e.target as HTMLInputElement;
+    if (input.files && input.files.length > 0) {
+        addDocFiles(input.files);
+        input.value = '';
+    }
+}
+
+function onDocDrop(e: DragEvent): void {
+    e.preventDefault();
+    docDragOver.value = false;
+    if (e.dataTransfer && e.dataTransfer.files.length > 0) {
+        addDocFiles(e.dataTransfer.files);
+    }
+}
+
+function removeStagedDoc(idx: number): void {
+    const [removed] = stagedDocs.value.splice(idx, 1);
+    if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+}
+
+function fmtBytes(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+onBeforeUnmount(() => {
+    for (const d of stagedDocs.value) {
+        if (d.previewUrl) URL.revokeObjectURL(d.previewUrl);
+    }
+});
+
 async function submit(): Promise<void> {
     submitting.value = true;
     errors.value = {};
+    docError.value = null;
 
     const payload: Record<string, unknown> = { ...form.value };
     for (const k of Object.keys(payload)) {
@@ -123,7 +225,40 @@ async function submit(): Promise<void> {
 
     try {
         const { data } = await axios.post('/api/rental-bookings', payload);
-        emit('created', { id: data.data.id });
+        const bookingId: string = data.data.id;
+
+        // Booking exists now — upload the staged documents against it.
+        // A failure here does NOT undo the booking; we count failures
+        // so the operator knows to re-attach from the booking later.
+        let failed = 0;
+        if (stagedDocs.value.length > 0) {
+            for (let i = 0; i < stagedDocs.value.length; i++) {
+                docUploadIndex.value = i + 1;
+                const fd = new FormData();
+                fd.append('file', stagedDocs.value[i].file);
+                fd.append('kind', stagedDocs.value[i].kind);
+                try {
+                    await axios.post(`/api/rental-bookings/${bookingId}/documents`, fd, {
+                        headers: { 'Content-Type': 'multipart/form-data' },
+                    });
+                } catch {
+                    failed++;
+                }
+            }
+            docUploadIndex.value = 0;
+        }
+
+        for (const d of stagedDocs.value) {
+            if (d.previewUrl) URL.revokeObjectURL(d.previewUrl);
+        }
+        stagedDocs.value = [];
+
+        if (failed > 0) {
+            docError.value = `${failed} document${failed === 1 ? '' : 's'} failed to upload — `
+                + 'the booking was saved; re-attach them from the bookings ledger.';
+        }
+
+        emit('created', { id: bookingId });
     } catch (err: unknown) {
         const e = err as { response?: { data?: { errors?: Record<string, string[]>; message?: string } } };
         errors.value = e.response?.data?.errors ?? {};
@@ -247,6 +382,71 @@ async function submit(): Promise<void> {
             · we earn <span class="font-semibold text-slate-900">{{ fmtMoney(ourCommissionPreview) }}</span>
         </div>
 
+        <!-- Documents — staged here, uploaded right after the booking is created -->
+        <div>
+            <label class="label">
+                Documents
+                <span class="text-xs font-normal text-slate-500">
+                    ({{ stagedDocs.length }}/{{ MAX_DOCS }} · PDF or image, 10MB each — agreement, payment proof, guest ID)
+                </span>
+            </label>
+
+            <div v-if="stagedDocs.length > 0" class="mt-1 space-y-2">
+                <div
+                    v-for="(d, idx) in stagedDocs"
+                    :key="idx"
+                    class="flex items-center gap-3 rounded-md border border-slate-200 bg-white px-3 py-2"
+                >
+                    <!-- Image thumbnail or PDF glyph -->
+                    <div class="h-10 w-10 shrink-0 overflow-hidden rounded bg-slate-100 flex items-center justify-center">
+                        <img v-if="d.previewUrl" :src="d.previewUrl" :alt="d.file.name" class="h-full w-full object-cover" />
+                        <span v-else class="text-[10px] font-mono font-bold text-slate-500">PDF</span>
+                    </div>
+                    <div class="min-w-0 flex-1">
+                        <div class="truncate text-sm text-slate-800">{{ d.file.name }}</div>
+                        <div class="text-xs text-slate-400">{{ fmtBytes(d.file.size) }}</div>
+                    </div>
+                    <select v-model="d.kind" class="input text-xs py-1 w-36 shrink-0">
+                        <option v-for="(label, value) in DOC_KIND_LABELS" :key="value" :value="value">{{ label }}</option>
+                    </select>
+                    <button
+                        type="button"
+                        class="shrink-0 text-xs text-red-600 hover:underline"
+                        @click="removeStagedDoc(idx)"
+                    >Remove</button>
+                </div>
+            </div>
+
+            <label
+                v-if="stagedDocs.length < MAX_DOCS"
+                class="mt-2 flex cursor-pointer flex-col items-center justify-center rounded-md border-2 border-dashed py-4 text-center text-xs transition-colors"
+                :class="docDragOver
+                    ? 'border-floor-accent bg-floor-accent/[0.06] text-slate-700'
+                    : 'border-slate-300 bg-slate-50 text-slate-500 hover:border-floor-accent/50'"
+                @dragover.prevent="docDragOver = true"
+                @dragenter.prevent="docDragOver = true"
+                @dragleave.prevent="docDragOver = false"
+                @drop="onDocDrop"
+            >
+                <input
+                    ref="docInputEl"
+                    type="file"
+                    accept="application/pdf,image/jpeg,image/png,image/webp"
+                    multiple
+                    class="hidden"
+                    :disabled="submitting"
+                    @change="onDocInputChange"
+                />
+                <span class="text-lg text-slate-400">+</span>
+                <span class="mt-0.5">Add documents — drop or click</span>
+            </label>
+
+            <p v-if="docError" class="mt-1 text-xs text-amber-700">{{ docError }}</p>
+            <p v-if="submitting && docUploadIndex > 0" class="mt-1 text-xs text-slate-500">
+                Uploading document {{ docUploadIndex }} of {{ stagedDocs.length }}…
+            </p>
+        </div>
+
         <!-- Owner notification -->
         <div class="flex items-start gap-2">
             <input id="notify_owner" v-model="form.notify_owner" type="checkbox" class="mt-1" />
@@ -261,7 +461,9 @@ async function submit(): Promise<void> {
         <div class="flex justify-end gap-2 border-t border-slate-200 pt-2">
             <button type="button" class="btn-ghost text-slate-600 hover:bg-slate-100" @click="emit('cancel')">Cancel</button>
             <button type="submit" class="btn-primary" :disabled="submitting || !form.listing_id">
-                {{ submitting ? 'Saving…' : 'Confirm booking' }}
+                {{ submitting
+                    ? (docUploadIndex > 0 ? 'Uploading documents…' : 'Saving…')
+                    : (stagedDocs.length > 0 ? `Confirm booking + ${stagedDocs.length} doc${stagedDocs.length === 1 ? '' : 's'}` : 'Confirm booking') }}
             </button>
         </div>
     </form>

@@ -22,6 +22,7 @@ use Illuminate\Routing\Controller;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 /**
@@ -133,7 +134,7 @@ final class RentalBookingController extends Controller
                 'b.check_in_date', 'b.check_out_date',
                 'b.total_price', 'b.owner_payout', 'b.our_commission',
                 'b.confirmed_at', 'b.owner_notified_at',
-                'b.listing_id', 'b.created_at',
+                'b.listing_id', 'b.created_at', 'b.documents',
                 'p.resort_name', 'p.resort_brand',
                 'p.location_city', 'p.location_state',
                 'o.id as owner_id', 'o.first_name as owner_first',
@@ -154,7 +155,18 @@ final class RentalBookingController extends Controller
             ')
             ->first();
 
-        $data = $rows->map(fn ($r) => [
+        $data = $rows->map(function ($r) {
+            // documents is a raw JSON string off the query builder
+            // (no model cast on a DB::table() row) — decode defensively.
+            $documents = [];
+            if (is_string($r->documents) && $r->documents !== '') {
+                $decoded = json_decode($r->documents, true);
+                if (is_array($decoded)) {
+                    $documents = $decoded;
+                }
+            }
+
+            return [
             'id' => $r->id,
             'confirmation_number' => $r->confirmation_number,
             'status' => $r->status,
@@ -168,6 +180,7 @@ final class RentalBookingController extends Controller
             'our_commission' => $r->our_commission !== null ? (float) $r->our_commission : null,
             'confirmed_at' => $r->confirmed_at,
             'owner_notified_at' => $r->owner_notified_at,
+            'documents' => $documents,
             'listing' => [
                 'id' => $r->listing_id,
                 'resort_name' => $r->resort_name,
@@ -185,7 +198,8 @@ final class RentalBookingController extends Controller
                 'name' => trim(($r->closer_first ?? '').' '.($r->closer_last ?? ''))
                     ?: '(unknown)',
             ] : null,
-        ]);
+            ];
+        });
 
         return response()->json([
             'data' => $data->values(),
@@ -544,5 +558,132 @@ final class RentalBookingController extends Controller
         }
 
         return $value;
+    }
+
+    /* ----------------------------------------------------------------------
+     | Document attachments — agreement / payment proof / ID / other
+     | ---------------------------------------------------------------------- */
+
+    /** Hard cap on attachments per booking. */
+    private const MAX_DOCUMENTS = 20;
+
+    /** Allowed `kind` values; mirrored in the front-end selector. */
+    private const DOCUMENT_KINDS = ['agreement', 'payment_proof', 'id', 'other'];
+
+    /**
+     * Upload a document to a booking.
+     *
+     *   POST /api/rental-bookings/{id}/documents
+     *   multipart/form-data: file, kind
+     *
+     * Stored on the `public` disk under bookings/{bookingId}/{uuid}.{ext}
+     * (on Cloud the `public` disk is auto-bound to the R2 bucket). The
+     * `documents` JSON column holds an ordered list of small objects:
+     * { url, name, kind, size, uploaded_at }.
+     */
+    public function uploadDocument(Request $request, string $id): JsonResponse
+    {
+        $request->validate([
+            // PDFs + images cover agreements, receipts, and ID scans.
+            'file' => ['required', 'file', 'mimes:pdf,jpg,jpeg,png,webp', 'max:10240'],
+            'kind' => ['nullable', 'in:'.implode(',', self::DOCUMENT_KINDS)],
+        ]);
+
+        $booking = Booking::query()->whereNotNull('listing_id')->find($id);
+        if ($booking === null) {
+            return response()->json(['message' => 'Booking not found'], 404);
+        }
+
+        $existing = is_array($booking->documents) ? $booking->documents : [];
+        if (count($existing) >= self::MAX_DOCUMENTS) {
+            return response()->json([
+                'message' => 'Document limit reached.',
+                'errors' => ['file' => ['This booking already has '.self::MAX_DOCUMENTS.' documents. Delete one first.']],
+            ], 422);
+        }
+
+        $file = $request->file('file');
+        $ext = strtolower($file->getClientOriginalExtension() ?: $file->extension());
+        $filename = Str::uuid()->toString().'.'.$ext;
+        $path = "bookings/{$booking->id}/{$filename}";
+
+        Storage::disk('public')->putFileAs(
+            "bookings/{$booking->id}",
+            $file,
+            $filename,
+            ['visibility' => 'public'],
+        );
+
+        $entry = [
+            'url' => Storage::disk('public')->url($path),
+            // Original filename, trimmed — what the operator recognises.
+            'name' => mb_substr($file->getClientOriginalName(), 0, 200),
+            'kind' => $request->string('kind')->value() ?: 'other',
+            'size' => $file->getSize(),
+            'uploaded_at' => Carbon::now()->toIso8601String(),
+        ];
+
+        $existing[] = $entry;
+        $booking->documents = $existing;
+        $booking->save();
+
+        return response()->json([
+            'document' => $entry,
+            'documents' => $existing,
+        ], 201);
+    }
+
+    /**
+     * Delete a document from a booking.
+     *
+     *   DELETE /api/rental-bookings/{id}/documents
+     *   { "url": "https://.../storage/bookings/{id}/{uuid}.pdf" }
+     *
+     * Scrubs the entry from the JSON column and best-effort deletes the
+     * underlying file. URL-not-in-array is treated as already-gone
+     * (no error) so a race with another tab doesn't surface a red banner.
+     */
+    public function deleteDocument(Request $request, string $id): JsonResponse
+    {
+        $request->validate([
+            'url' => ['required', 'string', 'max:2000'],
+        ]);
+
+        $booking = Booking::query()->whereNotNull('listing_id')->find($id);
+        if ($booking === null) {
+            return response()->json(['message' => 'Booking not found'], 404);
+        }
+
+        $existing = is_array($booking->documents) ? $booking->documents : [];
+        $target = $request->string('url')->value();
+
+        $remaining = array_values(array_filter(
+            $existing,
+            fn ($d) => ($d['url'] ?? null) !== $target,
+        ));
+
+        if (count($remaining) === count($existing)) {
+            return response()->json(['documents' => $remaining]);
+        }
+
+        // Map URL → disk path, anchored on the booking's own folder so a
+        // malformed URL can't reach a file outside this booking.
+        $needle = "bookings/{$booking->id}/";
+        $idx = strpos($target, $needle);
+        if ($idx !== false) {
+            $relative = substr($target, $idx);
+            if (! str_contains($relative, '..') && ! str_contains($relative, '//')) {
+                try {
+                    Storage::disk('public')->delete($relative);
+                } catch (\Throwable) {
+                    // File already gone — fine, scrub the entry anyway.
+                }
+            }
+        }
+
+        $booking->documents = $remaining;
+        $booking->save();
+
+        return response()->json(['documents' => $remaining]);
     }
 }

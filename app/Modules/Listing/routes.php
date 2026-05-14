@@ -119,6 +119,16 @@ Route::middleware(['auth:sanctum', 'tenant'])->group(function (): void {
         ->name('api.rental_bookings.bulk_preview');
     Route::post('/rental-bookings/bulk-import', [RentalBookingController::class, 'bulkImport'])
         ->name('api.rental_bookings.bulk_import');
+
+    // Booking document attachments (agreement / payment proof / ID).
+    // Stored on the public disk under bookings/{id}/...; the bookings
+    // row carries the manifest in its `documents` JSON column.
+    Route::post('/rental-bookings/{id}/documents', [RentalBookingController::class, 'uploadDocument'])
+        ->whereUuid('id')
+        ->name('api.rental_bookings.documents.upload');
+    Route::delete('/rental-bookings/{id}/documents', [RentalBookingController::class, 'deleteDocument'])
+        ->whereUuid('id')
+        ->name('api.rental_bookings.documents.delete');
 });
 
 /*

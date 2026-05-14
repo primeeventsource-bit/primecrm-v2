@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import axios from 'axios';
 
 /**
@@ -9,6 +9,12 @@ import axios from 'axios';
  * optionally override commission %. Owner payout is computed on the
  * fly so the operator sees the owner-facing number live; the server
  * recomputes from the same inputs so client-side math is advisory.
+ *
+ * Photos are STAGED client-side here (the listing doesn't exist yet,
+ * so there's no id to attach them to). On submit we create the
+ * listing first, then upload each staged photo against the new id
+ * before emitting `created`. A photo upload failing does NOT roll
+ * back the listing — it's already saved; we just report the count.
  */
 
 interface PropertyOption {
@@ -82,9 +88,68 @@ function fmtMoney(n: number | null): string {
     return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+/* ──────────────────────────────────────────────────────────────────────
+ * Photo staging — files held in memory until the listing is created.
+ * ──────────────────────────────────────────────────────────────────── */
+const MAX_PHOTOS = 12;
+interface StagedPhoto { file: File; previewUrl: string }
+const stagedPhotos = ref<StagedPhoto[]>([]);
+const photoError = ref<string | null>(null);
+const photoDragOver = ref(false);
+const photoInputEl = ref<HTMLInputElement | null>(null);
+/** 1..N while uploading post-create; 0 when idle. */
+const photoUploadIndex = ref(0);
+
+function addPhotoFiles(files: FileList | File[]): void {
+    photoError.value = null;
+    const incoming = Array.from(files).filter((f) => f.type.startsWith('image/'));
+    if (incoming.length === 0) {
+        photoError.value = 'Pick an image file (JPG, PNG, or WEBP).';
+        return;
+    }
+    for (const file of incoming) {
+        if (stagedPhotos.value.length >= MAX_PHOTOS) {
+            photoError.value = `Up to ${MAX_PHOTOS} photos per listing. Extra files were skipped.`;
+            break;
+        }
+        if (file.size > 5 * 1024 * 1024) {
+            photoError.value = `"${file.name}" is over 5MB and was skipped.`;
+            continue;
+        }
+        stagedPhotos.value.push({ file, previewUrl: URL.createObjectURL(file) });
+    }
+}
+
+function onPhotoInputChange(e: Event): void {
+    const input = e.target as HTMLInputElement;
+    if (input.files && input.files.length > 0) {
+        addPhotoFiles(input.files);
+        input.value = ''; // allow re-selecting the same file
+    }
+}
+
+function onPhotoDrop(e: DragEvent): void {
+    e.preventDefault();
+    photoDragOver.value = false;
+    if (e.dataTransfer && e.dataTransfer.files.length > 0) {
+        addPhotoFiles(e.dataTransfer.files);
+    }
+}
+
+function removeStagedPhoto(idx: number): void {
+    const [removed] = stagedPhotos.value.splice(idx, 1);
+    if (removed) URL.revokeObjectURL(removed.previewUrl);
+}
+
+// Object URLs leak if not revoked — clean up any survivors on unmount.
+onBeforeUnmount(() => {
+    for (const p of stagedPhotos.value) URL.revokeObjectURL(p.previewUrl);
+});
+
 async function submit(): Promise<void> {
     submitting.value = true;
     errors.value = {};
+    photoError.value = null;
 
     const payload: Record<string, unknown> = { ...form.value };
     for (const k of Object.keys(payload)) {
@@ -93,7 +158,38 @@ async function submit(): Promise<void> {
 
     try {
         const { data } = await axios.post('/api/listings', payload);
-        emit('created', { id: data.data.id });
+        const listingId: string = data.data.id;
+
+        // Listing exists now — upload the staged photos against it.
+        // A failure here does NOT undo the listing; we count failures
+        // and let the operator know they can retry from the detail page.
+        let failed = 0;
+        if (stagedPhotos.value.length > 0) {
+            for (let i = 0; i < stagedPhotos.value.length; i++) {
+                photoUploadIndex.value = i + 1;
+                const fd = new FormData();
+                fd.append('photo', stagedPhotos.value[i].file);
+                try {
+                    await axios.post(`/api/listings/${listingId}/photos`, fd, {
+                        headers: { 'Content-Type': 'multipart/form-data' },
+                    });
+                } catch {
+                    failed++;
+                }
+            }
+            photoUploadIndex.value = 0;
+        }
+
+        // Revoke previews before we tear the form down.
+        for (const p of stagedPhotos.value) URL.revokeObjectURL(p.previewUrl);
+        stagedPhotos.value = [];
+
+        if (failed > 0) {
+            photoError.value = `${failed} photo${failed === 1 ? '' : 's'} failed to upload — `
+                + 'the listing was saved; add them from its detail page.';
+        }
+
+        emit('created', { id: listingId });
     } catch (err: unknown) {
         const e = err as { response?: { data?: { errors?: Record<string, string[]>; message?: string } } };
         errors.value = e.response?.data?.errors ?? {};
@@ -213,6 +309,60 @@ async function submit(): Promise<void> {
             <p v-if="errors.marketing_description" class="mt-1 text-xs text-red-600">{{ errors.marketing_description[0] }}</p>
         </div>
 
+        <!-- Photos — staged here, uploaded right after the listing is created -->
+        <div>
+            <label class="label">
+                Photos
+                <span class="text-xs font-normal text-slate-500">
+                    ({{ stagedPhotos.length }}/{{ MAX_PHOTOS }} · JPG/PNG/WEBP, 5MB each)
+                </span>
+            </label>
+            <div class="mt-1 grid grid-cols-3 sm:grid-cols-4 gap-2">
+                <div
+                    v-for="(p, idx) in stagedPhotos"
+                    :key="p.previewUrl"
+                    class="group relative aspect-square overflow-hidden rounded-md border border-slate-200 bg-slate-50"
+                >
+                    <img :src="p.previewUrl" :alt="p.file.name" class="h-full w-full object-cover" />
+                    <button
+                        type="button"
+                        class="absolute right-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wider text-white opacity-0 transition-opacity group-hover:opacity-100 hover:bg-red-600/90"
+                        title="Remove"
+                        @click="removeStagedPhoto(idx)"
+                    >✕</button>
+                </div>
+
+                <label
+                    v-if="stagedPhotos.length < MAX_PHOTOS"
+                    class="flex aspect-square cursor-pointer flex-col items-center justify-center rounded-md border-2 border-dashed text-center text-xs transition-colors"
+                    :class="photoDragOver
+                        ? 'border-floor-accent bg-floor-accent/[0.06] text-slate-700'
+                        : 'border-slate-300 bg-slate-50 text-slate-500 hover:border-floor-accent/50'"
+                    @dragover.prevent="photoDragOver = true"
+                    @dragenter.prevent="photoDragOver = true"
+                    @dragleave.prevent="photoDragOver = false"
+                    @drop="onPhotoDrop"
+                >
+                    <input
+                        ref="photoInputEl"
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        multiple
+                        class="hidden"
+                        :disabled="submitting"
+                        @change="onPhotoInputChange"
+                    />
+                    <span class="text-xl text-slate-400">+</span>
+                    <span class="mt-0.5">Add photos</span>
+                    <span class="text-[10px] text-slate-400">drop or click</span>
+                </label>
+            </div>
+            <p v-if="photoError" class="mt-1 text-xs text-amber-700">{{ photoError }}</p>
+            <p v-if="submitting && photoUploadIndex > 0" class="mt-1 text-xs text-slate-500">
+                Uploading photo {{ photoUploadIndex }} of {{ stagedPhotos.length }}…
+            </p>
+        </div>
+
         <!-- Initial status -->
         <div class="flex items-center gap-2">
             <input id="go_live" v-model="form.go_live" type="checkbox" />
@@ -237,7 +387,9 @@ async function submit(): Promise<void> {
         <div class="flex justify-end gap-2 border-t border-slate-200 pt-2">
             <button type="button" class="btn-ghost text-slate-600 hover:bg-slate-100" @click="emit('cancel')">Cancel</button>
             <button type="submit" class="btn-primary" :disabled="submitting || !form.property_id">
-                {{ submitting ? 'Saving…' : 'Create listing' }}
+                {{ submitting
+                    ? (photoUploadIndex > 0 ? `Uploading photos…` : 'Saving…')
+                    : (stagedPhotos.length > 0 ? `Create listing + ${stagedPhotos.length} photo${stagedPhotos.length === 1 ? '' : 's'}` : 'Create listing') }}
             </button>
         </div>
     </form>

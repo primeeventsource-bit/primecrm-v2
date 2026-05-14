@@ -69,6 +69,8 @@ final class Booking extends Model
         'partner_site_id',
         'external_booking_id',
         'partner_metadata',
+        // Document attachments (added via add_documents_to_bookings).
+        'documents',
     ];
 
     protected function casts(): array
@@ -87,6 +89,8 @@ final class Booking extends Model
             'owner_notified_at' => 'datetime',
             // Partner-webhook origin
             'partner_metadata' => 'array',
+            // Document attachments — array of {url,name,kind,size,uploaded_at}.
+            'documents' => 'array',
         ];
     }
 
