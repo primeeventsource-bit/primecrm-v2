@@ -28,11 +28,19 @@ declare global {
  * a broadcasting backend yet, "no realtime" is the correct quiet
  * fallback; subscribers (`useEcho`, `usePrimeConnectRooms`, etc.)
  * already null-check `window.Echo`.
+ *
+ * The "skipping" notice only logs in dev — a developer running
+ * locally without a broadcast backend should see why realtime is
+ * off, but a production console shouldn't carry a standing info
+ * line. Set PUSHER_APP_KEY (+ cluster/host) on the environment to
+ * turn realtime on; nothing else needs to change.
  */
 export function initEcho(props: { echo: { host: string; key: string; cluster: string } }): PusherEcho | null {
     if (!props.echo.key) {
-        // eslint-disable-next-line no-console
-        console.info('[echo] Pusher key not set — skipping realtime WebSocket init.');
+        if (import.meta.env.DEV) {
+            // eslint-disable-next-line no-console
+            console.info('[echo] Pusher key not set — skipping realtime WebSocket init.');
+        }
         return null;
     }
 
