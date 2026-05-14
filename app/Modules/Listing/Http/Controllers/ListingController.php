@@ -415,10 +415,11 @@ final class ListingController extends Controller
             'expires_at' => $listing->expires_at,
             'created_at' => $listing->created_at,
             'marketing_description' => $listing->marketing_description,
-            // Model casts `photos` to array already; the previous
-            // json_decode was double-decoding and returning null in
-            // production where the cast had already run. Pass through.
-            'photos' => is_array($listing->photos) ? array_values($listing->photos) : [],
+            // $listing here is a query-builder stdClass (see the
+            // DB::table call above), so `photos` is the raw JSON
+            // string — the model's array cast did NOT run. normalizePhotos
+            // decodes it. See that method's docblock for the full trap.
+            'photos' => $this->normalizePhotos($listing->photos),
             'property' => [
                 'id' => $listing->property_id,
                 'resort_name' => $listing->resort_name,
@@ -708,7 +709,7 @@ final class ListingController extends Controller
             return response()->json(['message' => 'Listing not found'], 404);
         }
 
-        $existing = is_array($listing->photos) ? $listing->photos : [];
+        $existing = $this->normalizePhotos($listing->photos);
         if (count($existing) >= self::MAX_PHOTOS) {
             return response()->json([
                 'message' => 'Photo limit reached.',
@@ -766,7 +767,7 @@ final class ListingController extends Controller
             return response()->json(['message' => 'Listing not found'], 404);
         }
 
-        $existing = is_array($listing->photos) ? $listing->photos : [];
+        $existing = $this->normalizePhotos($listing->photos);
         $target = $request->string('url')->value();
 
         $remaining = array_values(array_filter($existing, fn ($u) => $u !== $target));
@@ -826,6 +827,41 @@ final class ListingController extends Controller
      * a brand-specific limit.
      */
     private const MAX_PHOTOS = 12;
+
+    /**
+     * Normalize the `photos` column into a clean list<string>, whatever
+     * shape it arrives in.
+     *
+     * The trap this exists to close: `show()` reads the listing via the
+     * QUERY BUILDER (`DB::table(...)`), so the model's `'photos' =>
+     * 'array'` cast never runs and `$listing->photos` is the raw JSON
+     * STRING. `uploadPhoto()` / `deletePhoto()` read it via Eloquent
+     * (`Listing::query()->find()`), so there it's already an array.
+     * Reading it inconsistently is exactly what produced the
+     * "0 / 12 photos" vs "already has 12 photos" contradiction in the
+     * UI. Route every read through here.
+     *
+     * Also drops non-string / empty entries so the count the API
+     * reports always matches what the gallery can actually render —
+     * no phantom slots.
+     *
+     * @return list<string>
+     */
+    private function normalizePhotos(mixed $value): array
+    {
+        if (is_string($value) && $value !== '') {
+            $value = json_decode($value, true);
+        }
+
+        if (! is_array($value)) {
+            return [];
+        }
+
+        return array_values(array_filter(
+            $value,
+            static fn ($u): bool => is_string($u) && $u !== '',
+        ));
+    }
 
     /* ----------------------------------------------------------------
      | Bulk import (CSV / Excel)
