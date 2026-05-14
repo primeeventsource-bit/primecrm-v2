@@ -4,6 +4,7 @@ import axios from 'axios';
 import { Link, router } from '@inertiajs/vue3';
 import AppLayout from '@/Layouts/AppLayout.vue';
 import AddBookingModal from '@/Components/Bookings/AddBookingModal.vue';
+import ManageBookingDocumentsModal from '@/Components/Bookings/ManageBookingDocumentsModal.vue';
 
 /**
  * Bookings ledger — confirmed rentals across all listings.
@@ -14,6 +15,15 @@ import AddBookingModal from '@/Components/Bookings/AddBookingModal.vue';
  */
 
 type Range = 'this_week' | 'this_month' | 'last_30' | 'last_90' | 'all';
+
+type DocKind = 'agreement' | 'payment_proof' | 'id' | 'other';
+interface BookingDocument {
+    url: string;
+    name: string;
+    kind: DocKind;
+    size: number;
+    uploaded_at: string;
+}
 
 interface BookingRow {
     id: string;
@@ -29,6 +39,7 @@ interface BookingRow {
     our_commission: number | null;
     confirmed_at: string | null;
     owner_notified_at: string | null;
+    documents: BookingDocument[];
     listing: {
         id: string;
         resort_name: string;
@@ -161,6 +172,35 @@ function onBookingCreated(): void {
     page.value = 1;
     void load();
 }
+
+/* ──────────────────────────────────────────────────────────────────────
+ * Document management for existing bookings. The ledger has no detail
+ * page, so the docs column opens a focused modal — upload / delete hit
+ * the API immediately (the booking already exists). On change we patch
+ * the row's `documents` in place so the count badge stays live without
+ * a full reload.
+ * ──────────────────────────────────────────────────────────────────── */
+const docsModalOpen = ref(false);
+const docsModalBooking = ref<BookingRow | null>(null);
+
+function openDocs(b: BookingRow): void {
+    docsModalBooking.value = b;
+    docsModalOpen.value = true;
+}
+
+function onDocsUpdated(documents: BookingDocument[]): void {
+    if (docsModalBooking.value === null) return;
+    const row = rows.value.find((r) => r.id === docsModalBooking.value!.id);
+    if (row) row.documents = documents;
+    // Keep the modal's bound row reference fresh too.
+    docsModalBooking.value.documents = documents;
+}
+
+const docsModalLabel = computed(() => {
+    const b = docsModalBooking.value;
+    if (!b) return '';
+    return `${b.confirmation_number} · ${b.renter_name ?? 'renter'} · ${b.listing.resort_name}`;
+});
 </script>
 
 <template>
@@ -192,6 +232,15 @@ function onBookingCreated(): void {
                 @close="createOpen = false"
                 @created="onBookingCreated"
                 @imported="onBookingCreated"
+            />
+
+            <ManageBookingDocumentsModal
+                :open="docsModalOpen"
+                :booking-id="docsModalBooking?.id ?? null"
+                :booking-label="docsModalLabel"
+                :initial-documents="docsModalBooking?.documents ?? []"
+                @close="docsModalOpen = false"
+                @updated="onDocsUpdated"
             />
 
             <!-- Aggregate strip -->
@@ -280,11 +329,12 @@ function onBookingCreated(): void {
                             <th class="px-3 py-2 text-left text-[10px] font-mono uppercase tracking-wider text-deck-dim">Status</th>
                             <th class="px-3 py-2 text-left text-[10px] font-mono uppercase tracking-wider text-deck-dim">Closer</th>
                             <th class="px-3 py-2 text-left text-[10px] font-mono uppercase tracking-wider text-deck-dim">Notified?</th>
+                            <th class="px-3 py-2 text-left text-[10px] font-mono uppercase tracking-wider text-deck-dim">Docs</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-deck-line/50">
                         <tr v-if="!loading && rows.length === 0">
-                            <td colspan="9" class="px-3 py-12 text-center text-sm text-deck-dim italic">
+                            <td colspan="10" class="px-3 py-12 text-center text-sm text-deck-dim italic">
                                 No bookings in this window. The success metric of the listing service goes here once renters land.
                             </td>
                         </tr>
@@ -328,6 +378,23 @@ function onBookingCreated(): void {
                             <td class="px-3 py-2 text-xs">
                                 <span v-if="b.owner_notified_at" class="text-floor-win">✓ {{ fmtDate(b.owner_notified_at) }}</span>
                                 <span v-else class="text-floor-lose">⚠ not yet</span>
+                            </td>
+                            <!-- Docs — @click.stop so it doesn't trigger the row's
+                                 navigate-to-listing. Opens the manage-documents modal. -->
+                            <td class="px-3 py-2 text-xs" @click.stop>
+                                <button
+                                    class="inline-flex items-center gap-1 rounded px-2 py-1 ring-1 transition-colors"
+                                    :class="b.documents.length > 0
+                                        ? 'text-deck-text ring-deck-line hover:bg-deck-raised/60'
+                                        : 'text-deck-dim ring-deck-line/60 hover:bg-deck-raised/40'"
+                                    :title="b.documents.length > 0
+                                        ? `${b.documents.length} document${b.documents.length === 1 ? '' : 's'} — click to manage`
+                                        : 'No documents — click to add'"
+                                    @click="openDocs(b)"
+                                >
+                                    <span>📎</span>
+                                    <span class="font-mono tabular-nums">{{ b.documents.length || 'add' }}</span>
+                                </button>
                             </td>
                         </tr>
                     </tbody>
