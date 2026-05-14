@@ -35,7 +35,17 @@ declare global {
  * line. Set PUSHER_APP_KEY (+ cluster/host) on the environment to
  * turn realtime on; nothing else needs to change.
  */
-export function initEcho(props: { echo: { host: string; key: string; cluster: string } }): PusherEcho | null {
+interface EchoConfig {
+    host: string;
+    key: string;
+    cluster: string;
+    /** Port the WS server listens on. 443 for Cloud/managed, 6001 for local Reverb. */
+    port?: number;
+    /** 'https' → wss + forceTLS; 'http' → ws (local dev only). */
+    scheme?: string;
+}
+
+export function initEcho(props: { echo: EchoConfig }): PusherEcho | null {
     if (!props.echo.key) {
         if (import.meta.env.DEV) {
             // eslint-disable-next-line no-console
@@ -46,16 +56,36 @@ export function initEcho(props: { echo: { host: string; key: string; cluster: st
 
     window.Pusher = Pusher;
 
+    // Cloud Reverb is wss on 443; a local Reverb/Soketi is ws on 6001.
+    // The server tells us which via scheme + port; we don't guess from
+    // whether `host` is set (the old `forceTLS: !host` was backwards —
+    // a populated Cloud host needs TLS, not the absence of it).
+    const useTLS = (props.echo.scheme ?? 'https') === 'https';
+    const port = props.echo.port ?? (useTLS ? 443 : 6001);
+
+    // /broadcasting/auth sits behind the `web` group → CSRF-verified.
+    // laravel-echo usually auto-reads the csrf-token meta tag, but pass
+    // it explicitly so a private-channel subscribe can never 419 on a
+    // missing header.
+    const csrf = document.head
+        .querySelector<HTMLMetaElement>('meta[name="csrf-token"]')?.content ?? '';
+
     window.Echo = new Echo({
         broadcaster: 'pusher',
         key: props.echo.key,
         cluster: props.echo.cluster,
         wsHost: props.echo.host || undefined,
-        wsPort: 6001,
-        wssPort: 6001,
-        forceTLS: !props.echo.host, // dev Soketi over plain HTTP; managed Pusher over WSS
+        wsPort: port,
+        wssPort: port,
+        forceTLS: useTLS,
         enabledTransports: ['ws', 'wss'],
         authEndpoint: '/broadcasting/auth',
+        auth: {
+            headers: {
+                'X-CSRF-TOKEN': csrf,
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+        },
     });
 
     return window.Echo;

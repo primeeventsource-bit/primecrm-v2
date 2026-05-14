@@ -32,6 +32,8 @@ export interface PageProps {
         host: string;
         key: string;
         cluster: string;
+        port?: number;
+        scheme?: string;
     };
     [key: string]: unknown;
 }

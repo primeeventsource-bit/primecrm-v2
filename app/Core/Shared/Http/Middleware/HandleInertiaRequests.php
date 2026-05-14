@@ -45,11 +45,16 @@ final class HandleInertiaRequests extends Middleware
                 'error' => fn () => $request->session()->get('error'),
             ],
             'csrf' => csrf_token(),
-            // Echo client config — same shape consumed by resources/js/echo.ts
+            // Echo client config — same shape consumed by resources/js/echo.ts.
+            // port + scheme matter for self-hosted / Cloud Reverb: the
+            // managed Reverb endpoint is wss on 443, local dev is ws on
+            // 6001. echo.ts derives forceTLS from `scheme`.
             'echo' => [
                 'host' => env('PUSHER_HOST', ''),
                 'key' => env('PUSHER_APP_KEY', ''),
                 'cluster' => env('PUSHER_APP_CLUSTER', 'mt1'),
+                'port' => (int) env('PUSHER_PORT', 443),
+                'scheme' => env('PUSHER_SCHEME', 'https'),
             ],
         ]);
     }

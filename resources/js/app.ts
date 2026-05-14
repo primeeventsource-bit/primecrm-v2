@@ -20,7 +20,7 @@ createInertiaApp({
         // (through unknown) avoids TS's "non-overlapping types"
         // complaint without weakening the runtime contract.
         const echoProps = props.initialPage.props as unknown as {
-            echo: { host: string; key: string; cluster: string };
+            echo: { host: string; key: string; cluster: string; port?: number; scheme?: string };
         };
         initEcho(echoProps);
 
