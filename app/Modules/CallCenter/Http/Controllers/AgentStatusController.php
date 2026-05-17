@@ -31,8 +31,10 @@ final class AgentStatusController extends Controller
             return response()->json(['error' => 'Forbidden'], 403);
         }
 
+        // users has first_name/last_name, not a single `name` column —
+        // eager-load both so AgentStatusResource can build fullName().
         $statuses = AgentStatusRecord::query()
-            ->with('agent:id,name')
+            ->with('agent:id,first_name,last_name')
             ->orderBy('status_changed_at', 'desc')
             ->get();
 
